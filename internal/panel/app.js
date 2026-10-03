@@ -379,7 +379,12 @@ function renderAccounts(list) {
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
     let cls = '', tag;
     if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
+    // 状态标签优先级：disabled > paused（上游，人工让位）> frozen（本复刻，低积分保护）> 冷却。
+    // paused 与 frozen 都可能与冷却并存，取更"强"的不可用原因展示。
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
+    // 冻结优先于冷却展示：冻结是持续性状态（余额回到阈值以上才自动解除），
+    // 冷却带倒计时——两者同时存在时报冻结更能解释"为什么这个号不参与选号"。
+    else if (s.frozen) { cls = 'cool'; tag = '<span class="tag warn">低积分冻结</span>'; }
     else if (cool > 0) {
       cls = 'cool';
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
@@ -411,7 +416,10 @@ function renderAccounts(list) {
       credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>
         '  ' + c.model + '：' + (c.cost_per_1k <= 0 ? '免费' : c.cost_per_1k)).join('\n');
     }
-    const frozen = s.disabled || cool > 0;
+    // 「解冻」按钮的适用面 = 处于惩罚态的号：禁用 / 低积分冻结 / 冷却中。
+    // pool.Revive 一次清掉这三类（清禁用、冷却、熔断运行态与低积分冻结），
+    // 冷却号显示解冻是原有行为（手工提前恢复），本次只把冻结纳入同一口径。
+    const penalized = s.disabled || s.frozen || cool > 0;
     const tu = s.token_usage || {};
     const req = tu.request_count || 0;
     const totalTok = formatTokenCount(tu.total_tokens);
@@ -442,7 +450,10 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
+        '<button class="xs ghost" data-a="threshold" data-u="' + esc(s.uid) + '">阈值</button>' +
+        // 按钮优先级（上游 paused 链 + 本复刻 frozen）：惩罚态（禁用/低积分冻结/冷却）先给「解冻」，
+        // 否则按是否已暂停给「恢复选号 / 暂停选号」；禁用号不再显示「禁用」。
+        (penalized ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
@@ -494,6 +505,8 @@ async function loadOverview(quiet) {
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
+    // 低积分冻结单列（与「冷却中」互斥）：冻结无倒计时，与冷却不是同一类运维处置。
+    $('sFrozen').textContent = d.frozen || 0;
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
@@ -531,7 +544,15 @@ $('accBody').addEventListener('click', async ev => {
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
-      toast('已解冻', 'ok');
+      // Revive 按设计不清阈值：余额仍低于阈值的号会在下一次余额刷新（周期任务默认
+      // 每 5 分钟）被自动重新冻结。按行数据（revive 前的 overviewData）补一句解释，
+      // 避免运维误以为「解冻按钮点了没用/自己回退」——界面必须给出原因。
+      const row = ((overviewData && overviewData.accounts) || []).find(x => x.uid === u);
+      if (row && row.frozen && (row.credits || 0) < (row.freeze_threshold || 0)) {
+        toast('已解冻（余额 ' + (row.credits || 0) + ' 仍低于阈值 ' + row.freeze_threshold + '，下次余额刷新将重新冻结）', 'ok');
+      } else {
+        toast('已解冻', 'ok');
+      }
     } else if (a === 'disable') {
       await api('accounts/' + encodeURIComponent(u) + '/disable', { method: 'POST' });
       toast('已禁用', 'ok');
@@ -543,6 +564,23 @@ $('accBody').addEventListener('click', async ev => {
       toast('已恢复选号', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'threshold') {
+      // 阈值预填当前值：从行数据（overviewData.accounts 就是本表渲染源）取，
+      // 不用 DOM 存值——列表每次操作后整体重渲染，两者不会不同步。
+      const row = ((overviewData && overviewData.accounts) || []).find(x => x.uid === u);
+      const current = (row && row.freeze_threshold) || 0;
+      const input = prompt('设置低积分冻结阈值（0 = 关闭）', current);
+      if (input === null) return; // 用户取消
+      const threshold = parseInt(input, 10);
+      if (isNaN(threshold) || threshold < 0) {
+        toast('请输入有效的非负整数', 'err');
+        return;
+      }
+      await api('accounts/' + encodeURIComponent(u) + '/freeze_threshold', {
+        method: 'POST',
+        body: JSON.stringify({ threshold: threshold })
+      });
+      toast('阈值已设置为 ' + threshold, 'ok');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');

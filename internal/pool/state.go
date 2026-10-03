@@ -70,9 +70,11 @@ func (p *Pool) ReviveDisabled(uid string) {
 	}
 }
 
-// Revive 运维口径的"无条件恢复"：清禁用、冷却（含软退避计数）与熔断运行态。
+// Revive 运维口径的"无条件恢复"：清禁用、冷却（含软退避计数）、熔断运行态与低积分冻结。
 // 与 ReviveDisabled（只清禁用）和 ReenableIfCredits（只清冷却、不动熔断）的区别：
 // 本方法清除全部惩罚状态，供管理面板"解冻"按钮使用——人工判断该号可用时一键恢复。
+// 低积分冻结（frozen）同属惩罚态，一并清除：人工恢复不要求余额先回到阈值以上
+// （阈值仍在，下次余额刷新若仍低于阈值会重新冻结——人工恢复是临时覆盖，不是关阈值）。
 // uid 不存在返回 false（供调用方区分"账号不存在"与"已复活"）。
 func (p *Pool) Revive(uid string) bool {
 	p.mu.Lock()
@@ -92,6 +94,7 @@ func (p *Pool) Revive(uid string) bool {
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
+	p.unfreezeLocked(e) // 清 frozen/frozenReason（冻结阈值保留）
 	p.dirty.Store(true)
 	return true
 }
@@ -123,6 +126,59 @@ func (p *Pool) Resume(uid string) bool {
 	return true
 }
 
+// SetFreezeThreshold 设置账号的低积分自动冻结阈值（管理面板入口；threshold <= 0 = 关闭）。
+//
+// 语义（全部在 p.mu 持锁下完成，与 credits 的读写天然互斥）：
+//   - threshold <= 0：关闭冻结，清 frozen/frozenReason（不论当前余额多少）；
+//   - threshold > 0 且 credits < threshold：立即冻结（freezeLocked，无需等下一次余额刷新）；
+//   - threshold > 0 且 credits >= threshold 且当前处于冻结态：立即解冻（unfreezeLocked，
+//     阈值调低后即刻恢复，不必等下一次余额刷新）。
+//
+// 阈值本身持久化（stateAccount.FreezeThreshold），重启后继续生效。冻结与禁用正交：
+// 本方法不读写 disabled/reason（已被禁用的号设阈值同样只改冻结域，禁用终态不变）。
+// uid 不存在为空操作（与 SetCredits 同口径）；本方法内部自持 p.mu，调用方不得持锁。
+func (p *Pool) SetFreezeThreshold(uid string, threshold int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	e.freezeThreshold = threshold
+	switch {
+	case threshold <= 0:
+		p.unfreezeLocked(e) // 关闭功能：清残留冻结态
+	case e.credits < threshold:
+		p.freezeLocked(e) // 阈值高于当前余额：立即冻结
+	case e.frozen:
+		p.unfreezeLocked(e) // 阈值不高于当前余额且已冻结：立即解冻
+	}
+	p.dirty.Store(true)
+}
+
+// checkFreezeLocked 低积分自动冻结/解冻的唯一判定点：credits 变更后由各入口调用
+// （ReenableIfCredits / SetCredits / SetCreditsDetailed / NoteModelCost），即"余额刷新
+// 与消费"两个方向的余额变化处——冻结与自动解冻都紧跟权威余额更新，不依赖额外定时器。
+// 新增 credits 写入口时必须一并调用本方法，否则会写出 frozen 与（阈值, 余额）不自洽的
+// state.json（SetCredits 曾漏调，面板单号「余额」刷新不解冻，见 persist.go 恢复侧对账）。
+//
+// 两个方向：
+//   - 阈值开启（>0）且 credits < threshold 且未冻结 → freezeLocked（进入冻结）；
+//   - 已冻结且 credits >= threshold → unfreezeLocked（余额恢复 → 自动解冻）。
+//
+// 第二条件未加"阈值 > 0"：阈值被关闭（0）后残留的冻结态不需要等 credits 变更即可
+// 自愈（0 阈值下任何非负余额都满足 >= 0），与 SetFreezeThreshold 的关闭分支互为兜底。
+// 阈值 0 = 关闭：不主动冻结。调用方必须已持有 p.mu。
+func (p *Pool) checkFreezeLocked(e *entry) {
+	if e.freezeThreshold > 0 && e.credits < e.freezeThreshold && !e.frozen {
+		p.freezeLocked(e)
+		return
+	}
+	if e.frozen && e.credits >= e.freezeThreshold {
+		p.unfreezeLocked(e)
+	}
+}
+
 // reviveCoolingLocked 只解冻余额耗尽冷却（CoolHard 的 until/coolKind/reason）并更新
 // credits，不动熔断器（fails/retryCount/breakerUntil）、软限流退避（CoolSoft/softStreak）
 // 与模型级台账（modelCooldowns）——限流冷却的恢复证据是重置墙钟到期，不是余额恢复。
@@ -144,6 +200,8 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 		e.creditsExpiring = 0
 		e.creditsEarliestExpiry = time.Time{}
 		e.creditsEarliestRemaining = 0
+		// 权威余额已更新：低积分冻结/自动解冻跟随判定（余额恢复到阈值以上即解冻）。
+		p.checkFreezeLocked(e)
 		p.dirty.Store(true)
 	}
 }
@@ -241,6 +299,8 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 				e.creditsEarliestRemaining -= d
 			}
 		}
+		// 实测扣费压低余额：低积分冻结跟随判定（消费到阈值以下即冻结，无需等签到/刷新）。
+		p.checkFreezeLocked(e)
 	}
 	if e.modelCost == nil {
 		e.modelCost = make(map[string]modelCostEntry)
@@ -427,42 +487,45 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	return e.a
 }
 
-// CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
-// cooling 含常规冷却（until）与熔断期（breakerUntil）。
-// 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
+// CountsDetailed 返回 total/healthy/cooling/frozen/disabled/inFlightFull 六类计数。
+// cooling 含常规冷却（until）、熔断期（breakerUntil）与连败降权（degradeUntil）——
+// **不含低积分冻结**：冻结单列 frozen（无倒计时，与 cooling 的"等一会儿会恢复"
+// 语义不同；此前冻结号被并进 cooling，运维从汇总看不出冻结规模，只能逐行看标签）。
+// 分类互斥且按判定优先级短路：disabled > frozen > cooling > healthy。
+// 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/frozen/until/breakerUntil）；
 // inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
 // 与 ServableNow 的区别见该函数注释。
 // 保持既有语义：paused 并入 disabled（= /status 的「不可用」口径）。监控/脚本只
 // 关心"还能不能用"，这个口径对它们是稳定契约，不因面板展示需要而改变。
-// 面板概况需要分开计数，用 CountsDetailedWithPaused。
-func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull int) {
-	t, h, c, d, pz, f := p.countsDetailedForRealm("")
-	return t, h, c, d + pz, f
+// 面板概况需要分开计数，用 CountsDetailedWithPaused。冻结号（本复刻）单列 frozen。
+func (p *Pool) CountsDetailed() (total, healthy, cooling, frozen, disabled, inFlightFull int) {
+	t, h, c, fz, d, pz, f := p.countsDetailedForRealm("")
+	return t, h, c, fz, d + pz, f
 }
 
 // CountsDetailedWithPaused 同 CountsDetailed，但 paused 与 disabled 分开返回。
 //
 // 面板概况要回答「禁用几个、暂停几个」——暂停只关选号、照常签到保活，与禁用混成
-// 一个数字会让人误判池子的真实状况（issue #125）。
-func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, inFlightFull int) {
+// 一个数字会让人误判池子的真实状况（issue #125）。本复刻的冻结同样单列（frozen）。
+func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, frozen, disabled, paused, inFlightFull int) {
 	return p.countsDetailedForRealm("")
 }
 
 // CountsDetailedForRealm 同 CountsDetailed，但仅统计 Realm()==realm 的账号；
 // realm=="" 不加谓词（= CountsDetailed）。供 /status 按域分组透出。
-func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
-	t, h, c, d, pz, f := p.countsDetailedForRealm(realm)
-	return t, h, c, d + pz, f
+func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, frozen, disabled, inFlightFull int) {
+	t, h, c, fz, d, pz, f := p.countsDetailedForRealm(realm)
+	return t, h, c, fz, d + pz, f
 }
 
-// countsDetailedForRealm 是两函数共用的遍历实现；realm=="" 不加谓词。
 // countsDetailedForRealm 是共用遍历实现；realm=="" 不加谓词。
 //
-// paused 单独返回、不并进 disabled：调用方按自己的口径决定合不合并。
-// /status 要的是「还能不能用」（暂停与禁用同样不可选，合并）；面板概况要的是
-// 「禁用几个、暂停几个」（分开，issue #125）。两种口径都合理，所以把选择权
-// 留在调用方，而不是让一个共享函数替所有人做决定。
-func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, inFlightFull int) {
+// paused / frozen 均单独返回、不并进 disabled/cooling：调用方按自己的口径决定合不合并。
+// /status 要的是「还能不能用」（暂停与禁用同样不可选，合并进 disabled）；面板概况要的是
+// 「禁用几个、暂停几个、冻结几个」（分开，issue #125 + 本复刻的冻结单列）。两种口径都
+// 合理，所以把选择权留在调用方，而不是让一个共享函数替所有人做决定。
+// 冻结号单列 frozen（不计入 cooling）：冻结没有倒计时，与冷却不是同一类运维处置。
+func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, frozen, disabled, paused, inFlightFull int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -478,6 +541,8 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 			// 暂停选号：退出选号候选，但照常签到 / 活跃上报 / 保活 / 刷新余额。
 			// 它与「禁用」是两种运维状态，这里分开计；要不要合并由调用方决定。
 			paused++
+		case e.frozen:
+			frozen++ // 低积分冻结：单列计数（不与 cooling 混计）
 		case !e.healthy(now):
 			cooling++
 		default:
@@ -487,7 +552,7 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 			}
 		}
 	}
-	return total, healthy, cooling, disabled, paused, inFlightFull
+	return total, healthy, cooling, frozen, disabled, paused, inFlightFull
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
@@ -558,6 +623,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Reason:                   e.reason,
 		Disabled:                 e.disabled,
 		Paused:                   e.paused,
+		FreezeThreshold:          e.freezeThreshold,
+		Frozen:                   e.frozen,
+		FrozenReason:             e.frozenReason,
 		SuccessCount:             e.successCount,
 		ErrTotal:                 e.errTotal,
 		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),

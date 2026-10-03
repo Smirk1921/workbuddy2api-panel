@@ -9,12 +9,19 @@ import (
 	"time"
 )
 
+// SetCredits 更新账号余额（credits 变更处）并**同步判定低积分冻结/自动解冻**：
+// 与 SetCreditsDetailed/ReenableIfCredits 同口径，两条余额刷新路径行为一致
+// （面板单号「余额」按钮走这里，用的是权威 UserResource 余额；此前不判冻结，
+// 会出现「余额已 >= 阈值但仍显示冻结」或「余额跌破阈值却不冻结」，
+// 且会写出 frozen=true 而 credits>=阈值 的不自洽 state.json，靠周期刷新才自愈）。
 func (p *Pool) SetCredits(uid string, credits, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
 		e.creditsTotal = total
+		// 权威余额已更新：低积分冻结/自动解冻跟随判定（见 checkFreezeLocked）。
+		p.checkFreezeLocked(e)
 		p.dirty.Store(true)
 	}
 }
@@ -95,6 +102,8 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, ea
 		e.creditsExpiring = expiring
 		e.creditsEarliestExpiry = earliestAt
 		e.creditsEarliestRemaining = earliestRemaining
+		// 权威余额已更新（签到/余额刷新）：低积分冻结/自动解冻跟随判定。
+		p.checkFreezeLocked(e)
 		p.dirty.Store(true)
 	}
 }

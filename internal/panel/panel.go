@@ -1,6 +1,6 @@
 // Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
-// 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
-// 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
+// 刷新余额/移除/低积分自动冻结阈值）、浏览器内 OAuth 添加账号（免重启热加载进池）、
+// 手动批量签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
 //
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
@@ -162,6 +162,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/freeze_threshold", p.withAuth(p.accountSetFreezeThreshold))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
@@ -231,8 +232,8 @@ func (p *Panel) expiringSoonWindow() time.Duration {
 // overview 总览：池计数 + 每账号状态 + 面板元信息。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
-	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
-	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
+	// 「不可用」口径），而概况卡片要分开展示（issue #125）。本复刻的冻结号同样单列（frozen）。
+	total, healthy, cooling, frozen, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
@@ -246,6 +247,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"total":           total,
 		"healthy":         healthy,
 		"cooling":         cooling,
+		// frozen 低积分冻结单列（与 cooling 互斥）：面板「低积分冻结」卡片数据源，
+		// 运维一眼看到冻结规模，不必逐行看标签（本复刻扩展）。
+		"frozen":          frozen,
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
@@ -504,6 +508,44 @@ func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("panel: resume uid=%s（恢复参与选号）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// accountSetFreezeThreshold 设置单号低积分自动冻结阈值（0 = 关闭）：
+// 余额低于阈值时账号自动冻结、退出选号；余额恢复到阈值以上自动解冻。
+// 冻结与禁用正交（禁用号设阈值只改冻结域，不改变禁用终态）。
+func (p *Panel) accountSetFreezeThreshold(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	// 指针类型区分「字段缺失」与「显式 0」：body 无 threshold（`{}` / 拼错键名）时
+	// 旧实现解出零值直接走「关闭」分支，静默清掉既有阈值与冻结态还返回 200，
+	// 调用方无法区分「显式关阈值」与「字段缺失/写错」——缺失一律 400。
+	var body struct {
+		Threshold *int64 `json:"threshold"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	if body.Threshold == nil {
+		writeErr(w, http.StatusBadRequest, "threshold required")
+		return
+	}
+	threshold := *body.Threshold
+	if threshold < 0 {
+		writeErr(w, http.StatusBadRequest, "threshold must be >= 0")
+		return
+	}
+	p.cfg.Pool.SetFreezeThreshold(uid, threshold)
+	// 回读冻结结果（阈值可高于当前余额 → 本次调用即冻结）。
+	frozen := false
+	if st, ok := p.cfg.Pool.Status(uid); ok {
+		frozen = st.Frozen
+	}
+	log.Printf("panel: freeze_threshold uid=%s threshold=%d frozen=%v", uid, threshold, frozen)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "threshold": threshold, "frozen": frozen})
 }
 
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），

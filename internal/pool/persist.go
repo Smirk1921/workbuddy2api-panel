@@ -149,17 +149,23 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			creditsEarliestRemaining: s.CreditsEarliestRemaining,
 			disabled:                 s.Disabled,
 			reason:                   s.Reason,
-			until:                    s.Until,
-			coolKind:                 s.CoolKind,
-			successCount:             s.SuccessCount,
-			errTotal:                 errTotal,
-			lastErr:                  s.LastErr,
-			lastSuccess:              s.LastSuccess,
-			lastCheckinDay:           s.LastCheckinDay,
-			tokenUsage:               s.TokenUsage,
-			softStreak:               s.SoftStreak,
-			sessionDeadFails:         s.SessionDeadFails,
-			consecutiveFails:         s.ConsecutiveFails,
+			// 低积分自动冻结：阈值/冻结态/原因原样恢复（旧 state.json 缺字段 → 零值，
+			// 即"未开启、未冻结"，与旧版加载行为零差异）。冻结号重启后不重新参与选号，
+			// 直到下一次余额刷新（ReenableIfCredits/SetCreditsDetailed）或 Revive。
+			freezeThreshold:  s.FreezeThreshold,
+			frozen:           s.Frozen,
+			frozenReason:     s.FrozenReason,
+			until:            s.Until,
+			coolKind:         s.CoolKind,
+			successCount:     s.SuccessCount,
+			errTotal:         errTotal,
+			lastErr:          s.LastErr,
+			lastSuccess:      s.LastSuccess,
+			lastCheckinDay:   s.LastCheckinDay,
+			tokenUsage:       s.TokenUsage,
+			softStreak:       s.SoftStreak,
+			sessionDeadFails: s.SessionDeadFails,
+			consecutiveFails: s.ConsecutiveFails,
 		}
 		// 到期快照按当前时刻惰性清洗：已过期、零剩余或超出总余额的脏数据不恢复。
 		if e.creditsExpiring < 0 {
@@ -174,6 +180,14 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		if e.creditsEarliestRemaining == 0 || e.creditsEarliestExpiry.IsZero() || !now.Before(e.creditsEarliestExpiry) {
 			e.creditsEarliestExpiry = time.Time{}
 			e.creditsEarliestRemaining = 0
+		}
+		// 幂等对账（历史脏数据自愈）：冻结态与（阈值, 余额）矛盾时不恢复冻结。
+		// 阈值关闭（<=0）或余额已达阈值却仍 frozen，是旧版单号余额刷新路径（SetCredits
+		// 不判冻结）写出的不自洽状态；恢复侧做一次对账，避免脏状态跨重启永久保留。
+		// 依赖同一不变式的合法场景不受影响：threshold>0 且 credits<threshold 的冻结照常恢复。
+		if e.frozen && (e.freezeThreshold <= 0 || e.credits >= e.freezeThreshold) {
+			e.frozen = false
+			e.frozenReason = ""
 		}
 		// 熔断器持久化恢复：breakerUntil 未过期才恢复（过期不复活），retryCount 仅在
 		// 熔断仍有效时保留（否则归零，不保留无用退避指数）。
@@ -301,6 +315,11 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsExpiring:          e.creditsExpiring,
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
+			// 低积分自动冻结：阈值/冻结态/原因直接落盘（三者均 omitempty，未开启
+			// 该功能的账号不新增字段）。
+			FreezeThreshold: e.freezeThreshold,
+			Frozen:          e.frozen,
+			FrozenReason:    e.frozenReason,
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

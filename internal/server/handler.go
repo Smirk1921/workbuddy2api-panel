@@ -179,7 +179,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
-	total, healthy, _, _, _ := h.cfg.Pool.CountsDetailed()
+	total, healthy, _, _, _, _ := h.cfg.Pool.CountsDetailed()
 	// 用 ServableNow 判定：healthy>0 但全占满在途时 chat 会 503，探活必须同口径，
 	// 否则负载均衡器会把流量持续打进无法受理的实例。
 	status := http.StatusOK
@@ -203,7 +203,7 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
-	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
+	total, healthy, cooling, frozen, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
 		sticky = h.cfg.StickyCount()
@@ -217,14 +217,18 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts":       h.cfg.Pool.List(),
-		"total":          total,
-		"healthy":        healthy,
-		"cooling":        cooling,
+		"accounts": h.cfg.Pool.List(),
+		"total":    total,
+		"healthy":  healthy,
+		"cooling":  cooling,
+		// frozen 低积分冻结单列：与 cooling 互斥（冻结无倒计时，汇总需能看出冻结规模）。
+		// 只新增键，既有汇总键语义调整仅限冻结号不再计入 cooling（该功能此前根本不存在
+		// 冻结号，未开启冻结的部署计数与旧版完全一致）。
+		"frozen":         frozen,
 		"disabled":       disabled,
 		"in_flight_full": inFlightFull,
 		// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
-		// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
+		// 只新增键，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
 		"realm_totals": map[string]map[string]int{
 			"cn":     countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("cn")),
 			"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
@@ -243,12 +247,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// countsMapFrom 把 CountsDetailed 五元组打包成 /status 的域分组建模。
-func countsMapFrom(total, healthy, cooling, disabled, inFlightFull int) map[string]int {
+// countsMapFrom 把 CountsDetailed 六元组打包成 /status 的域分组建模。
+func countsMapFrom(total, healthy, cooling, frozen, disabled, inFlightFull int) map[string]int {
 	return map[string]int{
 		"total":          total,
 		"healthy":        healthy,
 		"cooling":        cooling,
+		"frozen":         frozen,
 		"disabled":       disabled,
 		"in_flight_full": inFlightFull,
 	}

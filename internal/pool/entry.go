@@ -83,17 +83,23 @@ type Status struct {
 	RateLimitedModels []RateLimitedModel `json:"rate_limited_models,omitempty"`
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
-	Realm           string     `json:"realm,omitempty"`
-	Disabled        bool       `json:"disabled"`
-	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
-	SuccessCount    int64      `json:"success_count,omitempty"`
-	ErrTotal        int64      `json:"err_total,omitempty"`
-	LastSuccessTime time.Time  `json:"last_success,omitempty"`
-	LastErrTime     time.Time  `json:"last_err,omitempty"`
+	Realm          string `json:"realm,omitempty"`
+	Disabled       bool   `json:"disabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// FreezeThreshold/Frozen/FrozenReason 低积分自动冻结（与 disabled 正交）：
+	// 余额低于阈值自动冻结、恢复到阈值以上自动解冻。阈值 0 = 关闭（omitempty 使
+	// 未开启该功能的账号状态 JSON 不含新字段，零回归）。
+	FreezeThreshold int64     `json:"freeze_threshold,omitempty"`
+	Frozen          bool      `json:"frozen,omitempty"`
+	FrozenReason    string    `json:"frozen_reason,omitempty"`
+	SuccessCount    int64     `json:"success_count,omitempty"`
+	ErrTotal        int64     `json:"err_total,omitempty"`
+	LastSuccessTime time.Time `json:"last_success,omitempty"`
+	LastErrTime     time.Time `json:"last_err,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
-	CheckinDone bool        `json:"checkin_done,omitempty"`
-	TokenUsage  TokenUsage  `json:"token_usage,omitempty"`
+	CheckinDone bool       `json:"checkin_done,omitempty"`
+	TokenUsage  TokenUsage `json:"token_usage,omitempty"`
 	// ModelCosts 每模型实测成本台账（P1-anti-monopoly 可观测性）：运维据此自查
 	//「为什么总选它」——tier 0（免费）垄断 / tier 2 单价排序一眼可见。
 	// 仅 modelCostTTL 内的有效观测，每模型一行（cost_per_1k + last_seen +
@@ -193,7 +199,19 @@ type entry struct {
 	until          time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled       bool
 	reason         string
-	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
+	// freezeThreshold 低积分自动冻结阈值（0 = 关闭）。由管理面板 SetFreezeThreshold
+	// 设置；credits < freezeThreshold 时账号自动冻结（frozen），余额恢复到阈值以上
+	// 自动解冻。持久化（stateAccount.FreezeThreshold）。
+	freezeThreshold int64
+	// frozen 低积分冻结态（与 disabled 正交）：冻结是「余额不足」的临时出池，不是
+	// 授权/session 终态——不写 reason（用 frozenReason）、余额回升即自动解冻，
+	// 也不清熔断观测（fails/retryCount/breakerUntil，见 freezeLocked）。
+	// 持久化（stateAccount.Frozen）：重启后低积分号不会重新参与选号。
+	frozen bool
+	// frozenReason 冻结原因（固定 "低积分自动冻结"，仅 frozen 期间有值；解冻/Revive
+	// 清空）。与 reason 分列：reason 归冷却/禁用域，冻结不污染它（正交性）。
+	frozenReason string
+	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -266,6 +284,11 @@ func (e *entry) healthy(now time.Time) bool {
 	if e.disabled {
 		return false
 	}
+	if e.frozen {
+		// 低积分自动冻结：与 disabled 同为「不可选」终态判定，但可自动解冻
+		// （余额恢复到阈值以上时由 checkFreezeLocked 解除，见 transition.go）。
+		return false
+	}
 	if !e.until.IsZero() && now.Before(e.until) {
 		return false
 	}
@@ -279,12 +302,14 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在任一有效的 6004
-// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断。
+// 模型级冷却（modelCooldowns 非空），且尚未禁用、未冻结、未熔断。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
-// healthyForModel 与 ServableNow 共用本谓词，保证 chat 选号与探活口径一致。
+// healthyForModel 与 ServableForRealm/ServableNow 共用同一组前置闸
+// （disabled, frozen, breakerUntil）：保证 chat 选号与探活口径一致——否则冻结号
+// 若持有在途请求回写的 modelCooldowns 条目，探活会报「可服务」而选号恒无候选。
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
-	if e.disabled || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
+	if e.disabled || e.frozen || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
 		return false
 	}
 	for _, mc := range e.modelCooldowns {
@@ -319,6 +344,11 @@ func (e *entry) modelCooled(now time.Time, reqModel string) bool {
 // 且账号级 healthy 成立）。空 reqModel / 未记录模型 → 等价 healthy。
 func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 	if e.disabled {
+		return false
+	}
+	if e.frozen {
+		// 低积分冻结对**所有**模型生效（与 6004 的模型豁免不同：这不是限流，
+		// 是余额不足，切模型同样会 402）。
 		return false
 	}
 	if e.modelCooled(now, reqModel) {
@@ -405,19 +435,25 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64     `json:"credits"`
-	CreditsTotal int64     `json:"credits_total,omitempty"`
-	Disabled     bool      `json:"disabled"`
-	Reason       string    `json:"reason,omitempty"`
-	Until        time.Time `json:"until,omitempty"`
-	CoolKind     CoolKind  `json:"cool_kind"`
-	SuccessCount int64     `json:"success_count,omitempty"`
+	Credits      int64  `json:"credits"`
+	CreditsTotal int64  `json:"credits_total,omitempty"`
+	Disabled     bool   `json:"disabled"`
+	Reason       string `json:"reason,omitempty"`
+	// FreezeThreshold/Frozen/FrozenReason 低积分自动冻结（与 disabled 正交，见 entry
+	// 同名字段）。三者全部 omitempty：旧 state.json 缺这些字段 → 零值（阈值 0 = 关闭、
+	// 未冻结），加载行为与旧版完全一致；未开启该功能的账号落盘也不新增字段。
+	FreezeThreshold int64     `json:"freeze_threshold,omitempty"`
+	Frozen          bool      `json:"frozen,omitempty"`
+	FrozenReason    string    `json:"frozen_reason,omitempty"`
+	Until           time.Time `json:"until,omitempty"`
+	CoolKind        CoolKind  `json:"cool_kind"`
+	SuccessCount    int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
-	ErrTotal    int64      `json:"err_total,omitempty"`
-	ErrCount       int        `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
-	LastSuccess    time.Time  `json:"last_success,omitempty"`
-	LastErr        time.Time  `json:"last_err,omitempty"`
+	ErrTotal    int64     `json:"err_total,omitempty"`
+	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastErr     time.Time `json:"last_err,omitempty"`
 	// LastCheckinDay 最近一次签到成功的本地日期（entry.lastCheckinDay 同源）。
 	// 持久化以保留「当日已签」状态：签到后重启，面板按钮不回退成「签到」。
 	LastCheckinDay string     `json:"last_checkin_day,omitempty"`

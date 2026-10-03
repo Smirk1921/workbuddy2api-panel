@@ -286,9 +286,10 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	return v > 0
 }
 
-// pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
-// 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
-// CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
+// pickEarliestExpiryLocked 全冷却兜底：在非禁用、非冻结的软冷却/熔断账号中选截止最早的一个。
+// 分级：disabled 永不参与；frozen（低积分冻结）同样永不参与——已知余额低于阈值，调了必 402，
+// 比 CoolHard 更确定（CoolHard 至少可能已被签到恢复）；CoolHard（余额耗尽，等签到的号）同样排除
+// ——调了必 402，浪费轮换并产生噪音日志；CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
 //
 // 积分保底同样在此生效（model 非空时）：floor 把健康号全部拦掉后 cands 为空会走到
@@ -306,6 +307,13 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.disabled {
 			continue // 禁用的账号永不参与兜底
+		}
+		if e.frozen {
+			// 低积分冻结号永不参与兜底：freezeLocked 刻意保留 breakerUntil/degradeUntil
+			// （transition.go），这两个截止都计入 expiry()，若不在此显式排除，「冻结中且
+			// 熔断/降权未到期」的号会在无 healthy 候选时被兜底选中并打到上游——已知余额
+			// 不足，比 CoolHard 更确定必 402（排除理由同下一行的 CoolHard）。
+			continue
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402

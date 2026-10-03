@@ -231,7 +231,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 /* 模型表：紧凑一些，7 列在常见窗口下尽量免横向滚动 */
 .acc.md { min-width: 700px; }
 .acc.md th, .acc.md td { padding: 10px 9px; }
-.who { min-width: 118px; max-width: 200px; }
+.who { min-width: 118px; max-width: 144px; }
 #taskTable .who { max-width: 360px; }
 #taskTable .who .nm, #taskTable .who .id { white-space: normal; word-break: break-all; }
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -241,7 +241,14 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .realm-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
 .realm-opt input { accent-color: var(--accent); margin: 0; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.usage-cell { min-width: 268px; }
+.usage-cell { min-width: 240px; }
+/* 窄窗口（≤1400px）：用量列隐藏即时速度（tok/s，四个指标里最次要的）并放开
+   min-width，把横向空间让给动作列按钮——配合 .acts 的 flex-wrap，
+   修复「新增按钮后右侧显示不全」（1440 以下禁用/移除被裁切）。 */
+@media (max-width: 1400px) {
+  .usage-cell { min-width: 0; }
+  .usage-item.usage-rate { display: none; }
+}
 .usage-line {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   font: 600 11.5px/1.25 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -284,8 +291,19 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .rate-limit.model-unavailable { border-color: var(--line); background: var(--surface-2); color: var(--ink-3); }
 .rate-limit b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 .rate-limit span { color: var(--ink-2); }
-.acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
-.acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
+/* 动作列按钮多（签到/余额/任务/阈值/解冻|禁用/移除）。宽屏一行 6 个；
+   窗口 ≤1500px 时列宽不足，此前右侧按钮被裁切（禁用/移除看不到）——
+   窄屏改换行展示全部按钮，固定列宽 148px（3 按钮/行 + padding 22）保证
+   不被表格算法压成一列竖排。 */
+.acts { display: flex; gap: 4px; justify-content: flex-end; white-space: nowrap; }
+.acts button { padding: 3.5px 6px; font-size: 12.5px; white-space: nowrap; flex: none; }
+@media (max-width: 1500px) {
+  .acc .acts { flex-wrap: wrap; width: 148px; }
+}
+@media (max-width: 1240px) {
+  /* 更窄窗口：账号列再收窄，动作列按钮不被挤出容器（1200 下曾差 16px）。 */
+  .who { max-width: 120px; }
+}
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }

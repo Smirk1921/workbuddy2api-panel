@@ -156,7 +156,9 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			frozen:          s.Frozen,
 			frozenReason:    s.FrozenReason,
 			// 优先使用该账号积分：开关原样恢复（旧 state.json 缺字段 → false，零回归）。
-			priority:         s.Priority,
+			priority: s.Priority,
+			// 账号分组：标签原样恢复（旧 state.json 缺字段 → "" = 未分组，零回归）。
+			group:            s.Group,
 			until:            s.Until,
 			coolKind:         s.CoolKind,
 			successCount:     s.SuccessCount,
@@ -324,6 +326,8 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			FrozenReason:    e.frozenReason,
 			// 优先使用该账号积分：开关直接落盘（omitempty，未开启的账号不新增字段）。
 			Priority: e.priority,
+			// 账号分组：标签直接落盘（omitempty，未分组的账号不新增字段）。
+			Group: e.group,
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

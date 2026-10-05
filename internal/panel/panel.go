@@ -162,6 +162,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/freeze_threshold", p.withAuth(p.accountSetFreezeThreshold))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountSetPriority))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.withAuth(p.accountSetGroup))
+	p.mux.HandleFunc("GET /panel/api/groups", p.withAuth(p.groupsList))
+	p.mux.HandleFunc("POST /panel/api/groups/{group}/{action}", p.withAuth(p.groupAction))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
@@ -628,6 +631,194 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("panel: remove uid=%s（已出池并删除凭证文件）", uid)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---------------------------------------------------------------------------
+// 分组与批量操作
+// ---------------------------------------------------------------------------
+
+// accountSetGroup 设置单号的分组名（空串 = 移出分组/未分组）。
+// group 是账号元数据：只供面板「分组筛选 + 批量操作」，不影响池内任何选号/冻结/禁用行为。
+func (p *Panel) accountSetGroup(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	// 指针类型区分「字段缺失」与「显式空串」：body 无 group（`{}` / 拼错键名）时
+	// 旧口径会解出零值直接走「移出分组」，静默清掉既有组名还返回 200——缺失一律 400
+	// （与 freeze_threshold / priority 同口径）。
+	var body struct {
+		Group *string `json:"group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	if body.Group == nil {
+		writeErr(w, http.StatusBadRequest, "group required")
+		return
+	}
+	p.cfg.Pool.SetGroup(uid, *body.Group)
+	// 回读归一化后的组名（TrimSpace + 限长在池层做）。
+	group := ""
+	if st, ok := p.cfg.Pool.Status(uid); ok {
+		group = st.Group
+	}
+	log.Printf("panel: group uid=%s group=%q", uid, group)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": group})
+}
+
+// groupsList 列出当前全部分组名（含「未分组」哨兵），供前端构建筛选下拉。
+// 未分组也用 "$ungrouped" 表示空组名，避免与「全部分组」（无谓词）在 URL 里混淆。
+func (p *Panel) groupsList(w http.ResponseWriter, r *http.Request) {
+	seen := map[string]bool{}
+	hasUngrouped := false
+	for _, st := range p.cfg.Pool.List() {
+		if st.Group == "" {
+			hasUngrouped = true
+			continue
+		}
+		seen[st.Group] = true
+	}
+	groups := make([]string, 0, len(seen))
+	for g := range seen {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "groups": groups, "has_ungrouped": hasUngrouped})
+}
+
+// groupTarget 批量操作的作用域解析：返回命中的账号状态列表与规范化后的目标组名。
+// group=="__all__" → 全部账号；group=="__ungrouped__" → 仅未分组；否则仅该组账号。
+// group 为空时 400（必须显式指定作用域，避免把「全量」当成缺省值误伤）。
+func (p *Panel) groupTargets(group string) ([]pool.Status, string, error) {
+	if group == "" {
+		return nil, group, errMissingGroup
+	}
+	if group == "__ungrouped__" {
+		group = "" // 归一化为空组名的谓词
+	}
+	var out []pool.Status
+	for _, st := range p.cfg.Pool.List() {
+		switch {
+		case group == "__all__":
+			out = append(out, st)
+		case st.Group == group:
+			out = append(out, st)
+		}
+	}
+	return out, group, nil
+}
+
+var errMissingGroup = &panelError{msg: "group must not be empty (use __all__ / __ungrouped__ / 组名)"}
+
+type panelError struct{ msg string }
+
+func (e *panelError) Error() string { return e.msg }
+
+// groupAction 对一组账号批量执行操作：priority / threshold / freeze / revive / remove。
+// 全部走已有的单账号方法（SetPriority/SetFreezeThreshold/Disable/Revive/Remove），
+// 与面板行内按钮完全同语义——批量只是「在作用域内循环调用」，不引入新的池行为。
+//
+// 保护（不可逆操作 remove）：body 必须带 confirm（字符串）且与目标组名（或 "__all__"）
+// 完全一致——强制前端弹「输入组名确认」对话框，挡住误点；group=="__all__" 时要求
+// 输入 "__all__"（防止把「移除一组」误选成「移除全部」）。
+func (p *Panel) groupAction(w http.ResponseWriter, r *http.Request) {
+	action := r.PathValue("action")
+	group := r.PathValue("group")
+	targets, group, err := p.groupTargets(group)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var body struct {
+		Value   *float64 `json:"value"` // threshold 用
+		Confirm *string  `json:"confirm"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // body 可为空（priority/freeze/revive 不需要）
+
+	names := func() []string {
+		var ns []string
+		for _, st := range targets {
+			n := st.Nickname
+			if n == "" {
+				n = st.UID
+			}
+			ns = append(ns, n)
+		}
+		return ns
+	}
+	log.Printf("panel: group action=%s group=%q 命中 %d 个账号: %s", action, group, len(targets), strings.Join(names(), ", "))
+
+	affected := 0
+	switch action {
+	case "priority":
+		on := true
+		if body.Value != nil {
+			on = *body.Value != 0
+		}
+		for _, st := range targets {
+			p.cfg.Pool.SetPriority(st.UID, on)
+			affected++
+		}
+	case "threshold":
+		if body.Value == nil {
+			writeErr(w, http.StatusBadRequest, "threshold action requires body {value: number}")
+			return
+		}
+		th := int64(*body.Value)
+		if th < 0 {
+			writeErr(w, http.StatusBadRequest, "threshold must be >= 0")
+			return
+		}
+		for _, st := range targets {
+			p.cfg.Pool.SetFreezeThreshold(st.UID, th)
+			affected++
+		}
+	case "freeze":
+		for _, st := range targets {
+			p.cfg.Pool.Disable(st.UID, "group freeze (panel)")
+			affected++
+		}
+	case "revive":
+		for _, st := range targets {
+			p.cfg.Pool.Revive(st.UID)
+			affected++
+		}
+	case "remove":
+		// 不可逆：要求输入组名确认。
+		if body.Confirm == nil || *body.Confirm != group {
+			writeErr(w, http.StatusBadRequest, `remove requires body {confirm: "<组名或 __all__>"}，必须逐字匹配以确认不可逆操作`)
+			return
+		}
+		var fileErrs []string
+		for _, st := range targets {
+			a := p.cfg.Pool.Remove(st.UID)
+			if a == nil {
+				continue
+			}
+			affected++
+			if a.FilePath != "" {
+				if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
+					fileErrs = append(fileErrs, st.UID+": "+err.Error())
+				}
+			}
+		}
+		resp := map[string]any{"ok": true, "affected": affected, "removed": affected}
+		if len(fileErrs) > 0 {
+			resp["file_errors"] = fileErrs
+		}
+		log.Printf("panel: group remove group=%q removed=%d file_errors=%d", group, affected, len(fileErrs))
+		writeJSON(w, http.StatusOK, resp)
+		return
+	default:
+		writeErr(w, http.StatusNotFound, "unknown action: "+action+"（支持 priority/threshold/freeze/revive/remove）")
+		return
+	}
+	log.Printf("panel: group action=%s group=%q affected=%d", action, group, affected)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": affected})
 }
 
 // ---------------------------------------------------------------------------

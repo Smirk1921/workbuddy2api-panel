@@ -605,6 +605,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
+  /* 到期卡片可折叠：默认收起（只留标题 + 一行摘要），展开时封顶高度 + 内部滚动。
+     30 个账号的逐账号明细不再把「账号池」挤到屏幕外——展开态最多占约 44vh。 */
+  #expBox > header { cursor: pointer; user-select: none; }
+  #expBox .exp-caret { color: var(--ink-3); font-size: 10px; width: 11px; flex: none; }
+  #expBox .exp-body { max-height: 44vh; overflow-y: auto; }
+  #expBox.collapsed .exp-body { display: none; }
+  #expBox.collapsed .exp-hint { display: none; }
 
 </style>
 </head>
@@ -670,14 +677,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>
 
-      <div class="box" id="expBox" hidden>
-        <header>
-          <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
+      <div class="box collapsed" id="expBox" hidden>
+        <header id="expHead" title="点击展开 / 收起明细">
+          <span class="exp-caret" id="expCaret">▸</span>
+          <h3>积分到期提醒<span class="hint exp-hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
           <span class="grow"></span>
+          <span class="note" id="expSummary"></span>
           <span class="note" id="expNote"></span>
           <button class="xs" id="btnExp">检查</button>
         </header>
-        <div class="pad"><div id="expList"></div></div>
+        <div class="pad exp-body"><div id="expList"></div></div>
       </div>
 
       <div class="box">

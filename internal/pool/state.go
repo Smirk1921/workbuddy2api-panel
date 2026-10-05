@@ -156,6 +156,33 @@ func (p *Pool) SetFreezeThreshold(uid string, threshold int64) {
 	p.dirty.Store(true)
 }
 
+// SetPriority 设置/取消账号的「优先使用该账号积分」开关（管理面板入口）。
+//
+// 语义：priority=true 时该账号在选号中独占优先层——只要它可用（健康、未触积分保底、
+// 在途未满、未被请求级 tried 排除），本轮选号就只在优先号中选；优先号全部不可用时
+// 自动回落普通池（实现在 pick 的优先层过滤与 pickEarliestExpiryLocked 兜底）。
+// 多个账号同时设优先时，优先层内部仍按既有权重（credits/闲置/快过期）加权随机，
+// 不产生「谁是第一优先」的次序。
+//
+// 与冻结/禁用正交：那两个是**可用性**维度，本方法不读写 disabled/frozen——被冻结或
+// 禁用的优先号在 pick 的 healthy 过滤处已被排除，优先层自然为空并回落普通池；
+// 反向也成立（Revive 解冻不会清 priority，priority 只是偏好不是惩罚态）。
+// 开关本身持久化（stateAccount.Priority），重启后继续生效。
+// uid 不存在为空操作（与 SetCredits 同口径）；本方法内部自持 p.mu，调用方不得持锁。
+func (p *Pool) SetPriority(uid string, on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if e.priority == on {
+		return // 幂等：状态未变不置脏，避免无意义的 state.json 落盘
+	}
+	e.priority = on
+	p.dirty.Store(true)
+}
+
 // checkFreezeLocked 低积分自动冻结/解冻的唯一判定点：credits 变更后由各入口调用
 // （ReenableIfCredits / SetCredits / SetCreditsDetailed / NoteModelCost），即"余额刷新
 // 与消费"两个方向的余额变化处——冻结与自动解冻都紧跟权威余额更新，不依赖额外定时器。
@@ -626,6 +653,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		FreezeThreshold:          e.freezeThreshold,
 		Frozen:                   e.frozen,
 		FrozenReason:             e.frozenReason,
+		Priority:                 e.priority,
 		SuccessCount:             e.successCount,
 		ErrTotal:                 e.errTotal,
 		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),

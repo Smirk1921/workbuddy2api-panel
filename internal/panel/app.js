@@ -451,6 +451,7 @@ function renderAccounts(list) {
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         '<button class="xs ghost" data-a="threshold" data-u="' + esc(s.uid) + '">阈值</button>' +
+        '<button class="xs ' + (s.priority ? 'primary' : 'ghost') + '" data-a="priority" data-u="' + esc(s.uid) + '" title="' + (s.priority ? '已优先：只要该号可用就优先消耗它的积分；点击取消' : '点击设为优先：只要该号可用就优先消耗它的积分') + '">优先</button>' +
         // 按钮优先级（上游 paused 链 + 本复刻 frozen）：惩罚态（禁用/低积分冻结/冷却）先给「解冻」，
         // 否则按是否已暂停给「恢复选号 / 暂停选号」；禁用号不再显示「禁用」。
         (penalized ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
@@ -581,6 +582,15 @@ $('accBody').addEventListener('click', async ev => {
         body: JSON.stringify({ threshold: threshold })
       });
       toast('阈值已设置为 ' + threshold, 'ok');
+    } else if (a === 'priority') {
+      // 开关取反：从行数据读当前值（同 threshold，不用 DOM 存值）。
+      const row = ((overviewData && overviewData.accounts) || []).find(x => x.uid === u);
+      const next = !(row && row.priority);
+      await api('accounts/' + encodeURIComponent(u) + '/priority', {
+        method: 'POST',
+        body: JSON.stringify({ priority: next })
+      });
+      toast(next ? '已设为优先：将优先消耗该账号积分' : '已取消优先', 'ok');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');

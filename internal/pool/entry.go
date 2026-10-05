@@ -98,9 +98,12 @@ type Status struct {
 	// FreezeThreshold/Frozen/FrozenReason 低积分自动冻结（与 disabled 正交）：
 	// 余额低于阈值自动冻结、恢复到阈值以上自动解冻。阈值 0 = 关闭（omitempty 使
 	// 未开启该功能的账号状态 JSON 不含新字段，零回归）。
-	FreezeThreshold int64     `json:"freeze_threshold,omitempty"`
-	Frozen          bool      `json:"frozen,omitempty"`
-	FrozenReason    string    `json:"frozen_reason,omitempty"`
+	FreezeThreshold int64  `json:"freeze_threshold,omitempty"`
+	Frozen          bool   `json:"frozen,omitempty"`
+	FrozenReason    string `json:"frozen_reason,omitempty"`
+	// Priority 优先使用该账号的积分（管理面板「优先」开关；见 entry.priority）。
+	// omitempty：未开启的账号状态 JSON 不含该字段（零回归）。
+	Priority        bool      `json:"priority,omitempty"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -224,7 +227,15 @@ type entry struct {
 	// frozenReason 冻结原因（固定 "低积分自动冻结"，仅 frozen 期间有值；解冻/Revive
 	// 清空）。与 reason 分列：reason 归冷却/禁用域，冻结不污染它（正交性）。
 	frozenReason string
-	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
+	// priority 优先使用该账号的积分（管理面板「优先」开关，默认 false）。
+	// 为 true 时该账号在选号中独占优先层：只要它可用（健康、未触积分保底、在途未满、
+	// 未被请求级 tried 排除），本轮选号就只在优先号中选，其余账号仅在优先号全部不可用
+	// 时才轮到——即「先用完这个号的积分」（见 pick 的优先层过滤）。
+	// 与冻结/禁用正交：那两个是**可用性**维度，本字段只是**偏好**维度——被冻结/禁用的
+	// 优先号在 healthy 过滤处已被排除，优先层自然为空并回落普通池。
+	// 持久化（stateAccount.Priority）：重启后继续生效。
+	priority bool
+	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -456,12 +467,15 @@ type stateAccount struct {
 	// FreezeThreshold/Frozen/FrozenReason 低积分自动冻结（与 disabled 正交，见 entry
 	// 同名字段）。三者全部 omitempty：旧 state.json 缺这些字段 → 零值（阈值 0 = 关闭、
 	// 未冻结），加载行为与旧版完全一致；未开启该功能的账号落盘也不新增字段。
-	FreezeThreshold int64     `json:"freeze_threshold,omitempty"`
-	Frozen          bool      `json:"frozen,omitempty"`
-	FrozenReason    string    `json:"frozen_reason,omitempty"`
-	Until           time.Time `json:"until,omitempty"`
-	CoolKind        CoolKind  `json:"cool_kind"`
-	SuccessCount    int64     `json:"success_count,omitempty"`
+	FreezeThreshold int64  `json:"freeze_threshold,omitempty"`
+	Frozen          bool   `json:"frozen,omitempty"`
+	FrozenReason    string `json:"frozen_reason,omitempty"`
+	// Priority 优先使用该账号积分（管理面板开关，见 entry.priority）。omitempty：
+	// 未开启的账号落盘不新增字段（旧 state.json 加载零回归）。
+	Priority     bool      `json:"priority,omitempty"`
+	Until        time.Time `json:"until,omitempty"`
+	CoolKind     CoolKind  `json:"cool_kind"`
+	SuccessCount int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
 	ErrTotal    int64     `json:"err_total,omitempty"`

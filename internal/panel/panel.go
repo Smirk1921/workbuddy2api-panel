@@ -163,6 +163,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/freeze_threshold", p.withAuth(p.accountSetFreezeThreshold))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountSetPriority))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
@@ -546,6 +547,39 @@ func (p *Panel) accountSetFreezeThreshold(w http.ResponseWriter, r *http.Request
 	}
 	log.Printf("panel: freeze_threshold uid=%s threshold=%d frozen=%v", uid, threshold, frozen)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "threshold": threshold, "frozen": frozen})
+}
+
+// accountSetPriority 设置/取消单号的「优先使用该账号积分」开关：开启后只要该号可用
+// （健康、未触积分保底、在途未满），选号只在该号中进行——先用完它的积分；该号不可用
+// 时自动回落普通池。与冻结/禁用正交（对冻结号设优先只记录偏好，不改变冻结态）。
+func (p *Panel) accountSetPriority(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if _, ok := p.cfg.Pool.Status(uid); !ok {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	// 指针类型区分「字段缺失」与「显式 false」：body 无 priority（`{}` / 拼错键名）时
+	// 旧口径会解出零值直接走「取消优先」，静默清掉既有开关还返回 200——缺失一律 400
+	// （与 freeze_threshold 同口径）。
+	var body struct {
+		Priority *bool `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	if body.Priority == nil {
+		writeErr(w, http.StatusBadRequest, "priority required")
+		return
+	}
+	p.cfg.Pool.SetPriority(uid, *body.Priority)
+	// 回读落池结果（响应与池内一致）。
+	priority := false
+	if st, ok := p.cfg.Pool.Status(uid); ok {
+		priority = st.Priority
+	}
+	log.Printf("panel: priority uid=%s priority=%v", uid, priority)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "priority": priority})
 }
 
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），

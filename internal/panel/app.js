@@ -2997,6 +2997,47 @@ function expDaysLeft(dateStr, today) {
   return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
 }
 
+/* 到期卡片折叠状态：默认收起（只留标题 + 一行摘要），展开态封顶 44vh 内滚。
+   用户选择持久化跨会话记住——「账号池」的首要任务是看/管账号，明细按需展开。
+   localStorage 与 $ 都做存在性保护：前端 harness 的切片求值环境未必带 DOM 桩。 */
+const LS_EXP_OPEN = 'wb2api.expOpen';
+let expOpen = false;
+try { expOpen = localStorage.getItem(LS_EXP_OPEN) === '1'; } catch (e) { expOpen = false; }
+
+function applyExpState() {
+  const box = $('expBox'); if (!box) return;
+  box.classList.toggle('collapsed', !expOpen);
+  const c = $('expCaret'); if (c) c.textContent = expOpen ? '▾' : '▸';
+}
+function setExpOpen(open, persist) {
+  expOpen = open;
+  if (persist) { try { localStorage.setItem(LS_EXP_OPEN, open ? '1' : '0'); } catch (e) {} }
+  applyExpState();
+}
+
+/* 折叠态摘要（两种渲染共用）：最近到期日 + 30 天内到期账号数 + 查询失败数。
+   收起后仍保留告警信号，不必展开整屏长列表才知道「有没有要处理的」。
+   rows 由各渲染器从自己的数据源归一化：[{days, date, err}]；days=null 表示无到期信息。 */
+function renderExpSummary(rows) {
+  const sum = $('expSummary');
+  if (!sum) return;
+  let soonestDate = '', soonestDays = null, due30 = 0, errCnt = 0;
+  for (const r of rows) {
+    if (r.err) { errCnt++; continue; }
+    if (r.days === null || r.days === undefined) continue;
+    if (r.days <= 30) due30++;
+    if (soonestDays === null || r.days < soonestDays) { soonestDays = r.days; soonestDate = r.date; }
+  }
+  if (soonestDays === null) {
+    // 全部查询失败时不能报「无到期积分」——那是假信号。
+    sum.textContent = errCnt ? errCnt + ' 个账号查询失败（展开看明细）' : '30 天内无到期积分';
+  } else {
+    const w = soonestDays === 0 ? '今天' : soonestDays + ' 天后';
+    sum.textContent = '最近 ' + soonestDate + '（' + w + '）· ' + due30 + ' 个账号 30 天内有到期' +
+      (errCnt ? ' · ' + errCnt + ' 个查询失败' : '');
+  }
+}
+
 function renderExpiry(d) {
   const list = (d.accounts || []);
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -3058,12 +3099,20 @@ function renderExpiry(d) {
       '</span></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
+  // 折叠态摘要：最近到期日 + 30 天内到期账号数（packages 口径，含逐包明细）。
+  renderExpSummary(list.map(a => {
+    if (a.error) return { err: true };
+    const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
+    if (!bs.length) return {};
+    return { days: expDaysLeft(bs[0].date, today), date: bs[0].date };
+  }));
   // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
   const ageMin = lastPackages ? Math.floor((Date.now() - lastPackagesAt) / 60000) : 0;
   $('expNote').textContent = (lastPackagesAt && ageMin > 0)
     ? list.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，可点「检查」刷新'
     : list.length + ' 个账号 · 实时查询上游';
   $('expBox').hidden = false;
+  applyExpState();
 }
 
 /* 快照版到期提醒：不查上游，直接用 /overview 已有的 credits_earliest_expiry /
@@ -3113,8 +3162,14 @@ function renderExpirySnapshot(d) {
       '</span></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
+  // 折叠态摘要（快照口径：只有最早一批的日期与数量，无逐包明细）。
+  renderExpSummary(keyed.map(({ a, ms }) => {
+    if (!ms || !a.credits_earliest_remaining) return {};
+    return { days: Math.max(0, Math.ceil((ms - today.getTime()) / 86400000)),
+             date: new Date(ms).toISOString().slice(0, 10) };
+  }));
   $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';
-  $('expBox').hidden = false;
+  applyExpState();
 }
 
 async function loadExpiry(force) {
@@ -3137,7 +3192,16 @@ async function loadExpiry(force) {
   expFetching = false;
 }
 
-if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
+if ($('btnExp')) $('btnExp').onclick = () => { setExpOpen(true, true); loadExpiry(true); };
+
+// 卡片头部点击 = 展开/收起（「检查」按钮不触发收起，它有自己的处理）。
+if ($('expHead')) {
+  $('expHead').onclick = (ev) => {
+    if (ev.target.closest('#btnExp')) return;
+    setExpOpen(!expOpen, true);
+  };
+}
+applyExpState();
 
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);

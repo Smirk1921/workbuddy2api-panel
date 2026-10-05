@@ -183,6 +183,34 @@ func (p *Pool) SetPriority(uid string, on bool) {
 	p.dirty.Store(true)
 }
 
+// maxGroupLen 分组名的最大字节长度（防误粘长文本；与面板的输入校验同口径）。
+const maxGroupLen = 64
+
+// SetGroup 设置账号的分组名（管理面板入口；空串 = 移出分组/未分组）。
+//
+// 语义：group 是纯粹的账号元数据（见 entry.group）——只供面板「分组筛选 + 批量操作」
+// 使用，不影响选号/冻结/禁用/优先等任何池内行为。组名做首尾空白归一化并限长；
+// 空串清除分组（幂等：已是空串时不置脏，避免无意义的落盘）。
+// 组名本身持久化（stateAccount.Group），重启后继续生效。
+// uid 不存在为空操作（与 SetCredits 同口径）；本方法内部自持 p.mu，调用方不得持锁。
+func (p *Pool) SetGroup(uid string, group string) {
+	group = strings.TrimSpace(group)
+	if len(group) > maxGroupLen {
+		group = group[:maxGroupLen]
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if e.group == group {
+		return // 幂等
+	}
+	e.group = group
+	p.dirty.Store(true)
+}
+
 // checkFreezeLocked 低积分自动冻结/解冻的唯一判定点：credits 变更后由各入口调用
 // （ReenableIfCredits / SetCredits / SetCreditsDetailed / NoteModelCost），即"余额刷新
 // 与消费"两个方向的余额变化处——冻结与自动解冻都紧跟权威余额更新，不依赖额外定时器。
@@ -654,6 +682,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Frozen:                   e.frozen,
 		FrozenReason:             e.frozenReason,
 		Priority:                 e.priority,
+		Group:                    e.group,
 		SuccessCount:             e.successCount,
 		ErrTotal:                 e.errTotal,
 		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),

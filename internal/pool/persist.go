@@ -153,9 +153,11 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			// 低积分自动冻结：阈值/冻结态/原因原样恢复（旧 state.json 缺字段 → 零值，
 			// 即"未开启、未冻结"，与旧版加载行为零差异）。冻结号重启后不重新参与选号，
 			// 直到下一次余额刷新（ReenableIfCredits/SetCreditsDetailed）或 Revive。
-			freezeThreshold:  s.FreezeThreshold,
-			frozen:           s.Frozen,
-			frozenReason:     s.FrozenReason,
+			freezeThreshold: s.FreezeThreshold,
+			frozen:          s.Frozen,
+			frozenReason:    s.FrozenReason,
+			// 优先使用该账号积分：开关原样恢复（旧 state.json 缺字段 → false，零回归）。
+			priority:         s.Priority,
 			until:            s.Until,
 			coolKind:         s.CoolKind,
 			successCount:     s.SuccessCount,
@@ -322,6 +324,8 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			FreezeThreshold: e.freezeThreshold,
 			Frozen:          e.frozen,
 			FrozenReason:    e.frozenReason,
+			// 优先使用该账号积分：开关直接落盘（omitempty，未开启的账号不新增字段）。
+			Priority: e.priority,
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

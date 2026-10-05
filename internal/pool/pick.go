@@ -74,6 +74,23 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		cands = append(cands, e)
 	}
+	// 优先层（管理面板「优先」开关，entry.priority）：存在可用优先号时，本轮只在
+	// 优先号中选——语义是「先用完这个号的积分」。位置在成本分层**之前**：优先是
+	// 人工显式意图，强于自动推导的「免费模型优先」；否则优先号一旦实测收费（tier 2）
+	// 就会被成本分层整层滤掉，开关等于失效（这正是软权重方案做不到硬优先的坑）。
+	// 安全性不受影响：优先只决定「在可用账号里选谁」——禁用/冻结/积分保底/在途上限
+	// 都在上面的循环里先行判定，触底号与满载号不会因优先而被硬塞请求；优先号全部
+	// 不可用（含被 tried 排除）时 prio 为空，自动回落普通池。
+	// 多个优先号并存时层内仍按既有权重（credits/闲置/快过期）加权随机，不产生次序。
+	var prio []*entry
+	for _, e := range cands {
+		if e.priority {
+			prio = append(prio, e)
+		}
+	}
+	if len(prio) > 0 {
+		cands = prio
+	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
@@ -297,7 +314,7 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
 func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
-	var best *entry
+	var best, bestPrio *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
@@ -331,6 +348,16 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if best == nil || exp.Before(best.expiry(now)) {
 			best = e
 		}
+		// 优先号另记一份：兜底路径同样「优先号优先」（见函数尾），层内仍取最早到期者。
+		if e.priority && (bestPrio == nil || exp.Before(bestPrio.expiry(now))) {
+			bestPrio = e
+		}
+	}
+	// 优先号在兜底中同样优先：全池无 healthy 候选时（所有号都在软冷却/熔断/降权期），
+	// 若优先号也在这批「可能已恢复」的号里，先试它——与 pick 正常路径的优先语义一致。
+	// CoolHard（余额耗尽）与冻结号已在上方排除，故这里不会把必 402 的号捞回来。
+	if bestPrio != nil {
+		best = bestPrio
 	}
 	if best == nil {
 		return nil

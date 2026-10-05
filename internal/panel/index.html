@@ -291,13 +291,14 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .rate-limit.model-unavailable { border-color: var(--line); background: var(--surface-2); color: var(--ink-3); }
 .rate-limit b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 .rate-limit span { color: var(--ink-2); }
-/* 动作列按钮多（签到/余额/任务/阈值/解冻|禁用/移除）。宽屏一行 6 个；
-   窗口 ≤1500px 时列宽不足，此前右侧按钮被裁切（禁用/移除看不到）——
+/* 动作列按钮多（签到/余额/任务/阈值/优先/解冻|禁用/移除）。宽屏一行 7 个；
+   窗口 ≤1470px 时列宽不足，此前右侧按钮被裁切（禁用/移除看不到）——
    窄屏改换行展示全部按钮，固定列宽 148px（3 按钮/行 + padding 22）保证
-   不被表格算法压成一列竖排。 */
+   不被表格算法压成一列竖排。断点 1470 = 单行所需表格最小宽（实测 1132px）
+   + 侧栏/内边距（约 290px）+ 安全余量（约 50px），留出字体渲染差异的空间。 */
 .acts { display: flex; gap: 4px; justify-content: flex-end; white-space: nowrap; }
 .acts button { padding: 3.5px 6px; font-size: 12.5px; white-space: nowrap; flex: none; }
-@media (max-width: 1500px) {
+@media (max-width: 1470px) {
   .acc .acts { flex-wrap: wrap; width: 148px; }
 }
 @media (max-width: 1240px) {

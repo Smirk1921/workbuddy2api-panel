@@ -690,6 +690,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
         </header>
+        <!-- 分组筛选 + 批量操作条：筛选下拉挂在账号盒（复用 .fbar 筛选条样式），
+             批量操作作用于当前选中的作用域（全部 / 未分组 / 某一分组）。 -->
+        <div class="fbar" id="groupBar">
+          <span class="flab">分组</span>
+          <select id="groupFilter" aria-label="按分组筛选"></select>
+          <button class="xs" id="btnGroupEdit" title="编辑当前行的分组（选账号行操作）">编辑分组</button>
+          <span class="grow"></span>
+          <span class="flab" id="groupScope"></span>
+          <button class="xs" id="btnGPriority" title="对作用域内账号批量设优先/取消优先">优先</button>
+          <button class="xs" id="btnGThreshold" title="对作用域内账号批量设低积分冻结阈值">阈值</button>
+          <button class="xs" id="btnGFreeze" title="对作用域内账号批量冻结（禁用）">冻结</button>
+          <button class="xs" id="btnGRevive" title="对作用域内账号批量解冻">解冻</button>
+          <button class="xs danger" id="btnGRemove" title="不可逆：移除作用域内全部账号并删除凭证文件（需输入组名确认）">移除</button>
+        </div>
         <div class="tbl-wrap">
         <table class="acc">
           <thead><tr>

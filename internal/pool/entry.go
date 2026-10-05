@@ -103,7 +103,10 @@ type Status struct {
 	FrozenReason    string `json:"frozen_reason,omitempty"`
 	// Priority 优先使用该账号的积分（管理面板「优先」开关；见 entry.priority）。
 	// omitempty：未开启的账号状态 JSON 不含该字段（零回归）。
-	Priority        bool      `json:"priority,omitempty"`
+	Priority bool `json:"priority,omitempty"`
+	// Group 账号分组名（管理面板标签，空串 = 未分组；见 entry.group）。
+	// omitempty：未分组的账号状态 JSON 不含该字段（零回归）。
+	Group           string    `json:"group,omitempty"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -235,6 +238,12 @@ type entry struct {
 	// 优先号在 healthy 过滤处已被排除，优先层自然为空并回落普通池。
 	// 持久化（stateAccount.Priority）：重启后继续生效。
 	priority bool
+	// group 账号分组名（管理面板标签，空串 = 未分组）。纯粹的账号元数据——
+	// 不影响选号/冻结/禁用等任何池内行为，只供面板「分组筛选 + 批量操作」使用
+	// （对一组账号批量设优先/阈值/冻结/移除）。重新登录/重导入不会丢（它是池状态
+	// 不是凭证字段，auths/*.json 由上游 OAuth 下发、重登会整体重写）。
+	// 持久化（stateAccount.Group）：重启后继续生效。
+	group    string
 	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
@@ -472,7 +481,10 @@ type stateAccount struct {
 	FrozenReason    string `json:"frozen_reason,omitempty"`
 	// Priority 优先使用该账号积分（管理面板开关，见 entry.priority）。omitempty：
 	// 未开启的账号落盘不新增字段（旧 state.json 加载零回归）。
-	Priority     bool      `json:"priority,omitempty"`
+	Priority bool `json:"priority,omitempty"`
+	// Group 账号分组名（管理面板标签，见 entry.group）。omitempty：
+	// 未分组的账号落盘不新增字段（旧 state.json 加载零回归）。
+	Group        string    `json:"group,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`

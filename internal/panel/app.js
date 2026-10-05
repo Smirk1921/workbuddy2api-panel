@@ -365,6 +365,57 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+/* 分组：筛选下拉的状态。作用域三态——'__all__'（全部）/ '__ungrouped__'（未分组）/ 组名。
+   挂在 loadOverview 之后：分组下拉每次刷新从最新 overviewData 重算，批量操作同样
+   以当前选中的作用域为准。 */
+let groupScope = '__all__';
+
+function groupOf(s) { return s.group || ''; }
+function groupInScope(s) {
+  if (groupScope === '__all__') return true;
+  if (groupScope === '__ungrouped__') return !groupOf(s);
+  return groupOf(s) === groupScope;
+}
+
+/* 重新构建分组下拉（保留当前选择；选择的分组被删空后回落「全部」）。 */
+function renderGroupBar() {
+  const sel = $('groupFilter');
+  if (!sel) return;
+  const list = (overviewData && overviewData.accounts) || [];
+  const groups = [...new Set(list.map(groupOf).filter(Boolean))].sort();
+  const hasUngrouped = list.some(s => !groupOf(s));
+  const opts = ['<option value="__all__">全部</option>'];
+  if (hasUngrouped) opts.push('<option value="__ungrouped__">未分组</option>');
+  for (const g of groups) opts.push('<option value="' + esc(g) + '">' + esc(g) + '</option>');
+  sel.innerHTML = opts.join('');
+  // 保留当前选择（若该分组已不存在则回落「全部」）。
+  // 不用 CSS.escape：冒烟测试的 DOM 桩与旧版浏览器都没有它——改成按 option.value 遍历匹配。
+  let keep = false;
+  for (const o of sel.options) { if (o.value === groupScope) { keep = true; break; } }
+  if (keep) sel.value = groupScope;
+  else { groupScope = '__all__'; sel.value = '__all__'; }
+  updateGroupScopeNote();
+}
+
+/* 作用域计数提示（右侧 "N 个账号"）。 */
+function updateGroupScopeNote() {
+  const n = $('groupScope');
+  if (!n) return;
+  const list = (overviewData && overviewData.accounts) || [];
+  const cnt = list.filter(groupInScope).length;
+  const label = groupScope === '__all__' ? '全部' : (groupScope === '__ungrouped__' ? '未分组' : groupScope);
+  n.textContent = '作用域「' + label + '」· ' + cnt + ' 个账号';
+}
+
+/* 批量操作统一入口：把当前作用域解析成后端 group 参数并调用批量端点。 */
+async function groupBatch(action, extraBody) {
+  const g = groupScope === '__all__' ? '__all__' : (groupScope === '__ungrouped__' ? '__ungrouped__' : groupScope);
+  return api('groups/' + encodeURIComponent(g) + '/' + encodeURIComponent(action), {
+    method: 'POST',
+    body: JSON.stringify(extraBody || {})
+  });
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
@@ -373,7 +424,13 @@ function renderAccounts(list) {
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  // 分组筛选：先按当前作用域过滤，再渲染（渲染与统计条互不影响）。
+  const visible = list.filter(groupInScope);
+  if (!visible.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">当前分组下没有账号。可切换上方「分组」筛选，或给账号分配分组。</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = visible.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -429,7 +486,7 @@ function renderAccounts(list) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (groupOf(s) ? ' <span class="realm-tag" title="所属分组">' + esc(groupOf(s)) + '</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -452,6 +509,7 @@ function renderAccounts(list) {
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         '<button class="xs ghost" data-a="threshold" data-u="' + esc(s.uid) + '">阈值</button>' +
         '<button class="xs ' + (s.priority ? 'primary' : 'ghost') + '" data-a="priority" data-u="' + esc(s.uid) + '" title="' + (s.priority ? '已优先：只要该号可用就优先消耗它的积分；点击取消' : '点击设为优先：只要该号可用就优先消耗它的积分') + '">优先</button>' +
+        '<button class="xs ghost" data-a="group" data-u="' + esc(s.uid) + '" title="设置该账号的分组名（空 = 移出分组/未分组）">分组</button>' +
         // 按钮优先级（上游 paused 链 + 本复刻 frozen）：惩罚态（禁用/低积分冻结/冷却）先给「解冻」，
         // 否则按是否已暂停给「恢复选号 / 暂停选号」；禁用号不再显示「禁用」。
         (penalized ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
@@ -524,6 +582,7 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    renderGroupBar(); // 分组下拉随 overview 刷新（保留当前选择）
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
@@ -591,6 +650,17 @@ $('accBody').addEventListener('click', async ev => {
         body: JSON.stringify({ priority: next })
       });
       toast(next ? '已设为优先：将优先消耗该账号积分' : '已取消优先', 'ok');
+    } else if (a === 'group') {
+      // 分组预填当前值：从行数据取（不用 DOM 存值）。空串 = 移出分组/未分组。
+      const row = ((overviewData && overviewData.accounts) || []).find(x => x.uid === u);
+      const current = (row && row.group) || '';
+      const input = prompt('设置分组名（留空 = 移出分组/未分组）', current);
+      if (input === null) return; // 用户取消
+      await api('accounts/' + encodeURIComponent(u) + '/group', {
+        method: 'POST',
+        body: JSON.stringify({ group: input.trim() })
+      });
+      toast(input.trim() ? '已加入分组「' + input.trim() + '」' : '已移出分组', 'ok');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -603,6 +673,97 @@ $('btnCheckinAll').onclick = async () => {
   try { await api('checkin_all', { method: 'POST' }); toast('全部签到已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
+
+/* ── 分组筛选 + 批量操作 ────────────────────────────────────────────── */
+$('groupFilter').onchange = () => {
+  groupScope = $('groupFilter').value;
+  updateGroupScopeNote();
+  renderAccounts((overviewData && overviewData.accounts) || []);
+};
+
+$('btnGroupEdit').onclick = async () => {
+  // 选中的第一行账号作为编辑对象（若作用域内只有一行则唯一；否则提示用行内按钮）。
+  const list = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
+  if (!list.length) { toast('当前作用域下没有账号', 'err'); return; }
+  const row = list[0];
+  const current = row.group || '';
+  const input = prompt('设置分组名（留空 = 移出分组/未分组）\n账号：' + (row.nickname || row.uid), current);
+  if (input === null) return;
+  await api('accounts/' + encodeURIComponent(row.uid) + '/group', {
+    method: 'POST',
+    body: JSON.stringify({ group: input.trim() })
+  });
+  toast(input.trim() ? '已加入分组「' + input.trim() + '」' : '已移出分组', 'ok');
+  loadOverview(true);
+};
+
+$('btnGPriority').onclick = async () => {
+  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+  const input = prompt('对「' + label + '」批量设置「优先」？\n输入 1 = 设为优先，0 = 取消优先', '1');
+  if (input === null) return;
+  const on = input.trim() !== '0';
+  try {
+    const r = await groupBatch('priority', { value: on ? 1 : 0 });
+    toast((on ? '已设优先 ' : '已取消优先 ') + r.affected + ' 个账号', 'ok');
+    loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+$('btnGThreshold').onclick = async () => {
+  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+  const input = prompt('对「' + label + '」批量设置低积分冻结阈值（0 = 关闭）', '0');
+  if (input === null) return;
+  const th = parseInt(input, 10);
+  if (isNaN(th) || th < 0) { toast('请输入有效的非负整数', 'err'); return; }
+  try {
+    const r = await groupBatch('threshold', { value: th });
+    toast('已对 ' + r.affected + ' 个账号设置阈值 ' + th, 'ok');
+    loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+$('btnGFreeze').onclick = async () => {
+  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+  if (!confirm('对「' + label + '」批量冻结（禁用）？\n冻结后这些账号不再参与选号，需手动解冻才能恢复。')) return;
+  try {
+    const r = await groupBatch('freeze');
+    toast('已冻结 ' + r.affected + ' 个账号', 'ok');
+    loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+$('btnGRevive').onclick = async () => {
+  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+  if (!confirm('对「' + label + '」批量解冻？\n将清除这些账号的禁用、冷却、熔断与低积分冻结状态。')) return;
+  try {
+    const r = await groupBatch('revive');
+    toast('已解冻 ' + r.affected + ' 个账号', 'ok');
+    loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+$('btnGRemove').onclick = async () => {
+  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+  // 不可逆保护：必须逐字输入组名（或 __all__），防止误点。
+  const want = groupScope;
+  const input = prompt('⚠️ 不可逆操作：将移除「' + label + '」下全部账号并删除其凭证文件（auths/*.json），恢复需重新登录。\n\n请逐字输入「' + want + '」确认：', '');
+  if (input === null) return;
+  if (input !== want) {
+    toast('输入与「' + want + '」不一致，已取消（防误删）', 'err');
+    return;
+  }
+  try {
+    const r = await groupBatch('remove', { confirm: want });
+    const fe = r.file_errors && r.file_errors.length ? '（' + r.file_errors.length + ' 个凭证文件删除失败）' : '';
+    toast('已移除 ' + (r.removed || r.affected || 0) + ' 个账号' + fe, 'ok');
+    loadOverview(true);
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+/* 初始化分组下拉（首次加载时填充）。 */
+renderGroupBar();
+
+
 $('btnKeepaliveAll').onclick = async () => {
   try { await api('keepalive_all', { method: 'POST' }); toast('全部保活已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }

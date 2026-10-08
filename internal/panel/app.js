@@ -2991,7 +2991,10 @@ let expOpen = false;
 try { expOpen = localStorage.getItem(LS_EXP_OPEN) === '1'; } catch (e) { expOpen = false; }
 
 function applyExpState() {
-  const box = $('expBox'); if (!box) return;
+  const box = $('expBox');
+  // 上游的单测/冒烟 harness 会在无完整 DOM 桩的环境里直接调 renderExpiry——
+  // 那里 $('expBox') 可能返回一个没有 classList 的桩对象，必须整体跳过。
+  if (!box || !box.classList) return;
   box.classList.toggle('collapsed', !expOpen);
   const c = $('expCaret'); if (c) c.textContent = expOpen ? '▾' : '▸';
 }

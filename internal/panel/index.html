@@ -250,6 +250,11 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
   .usage-cell { min-width: 0; }
   .usage-item.usage-rate { display: none; }
 }
+/* 更窄窗口（≤1180px）：用量列再收一档（隐藏延迟），保证 9 按钮动作列在 1100
+   也不横向溢出——窄屏宁可少显示一个次要指标，也不让按钮被裁切。 */
+@media (max-width: 1180px) {
+  .usage-item.usage-latency { display: none; }
+}
 .usage-line {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   font: 600 11.5px/1.25 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap;

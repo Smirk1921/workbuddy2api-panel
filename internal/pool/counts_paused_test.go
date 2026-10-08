@@ -23,7 +23,8 @@ func TestCountsPausedSeparate(t *testing.T) {
 	p.Disable("u3", "手工禁用")
 
 	// --- 合并口径（/status 契约）：暂停计入 disabled ---
-	total, healthy, _, disabled, _ := p.CountsDetailed()
+	// 签名含本复刻扩展的单列计数器 frozen（(total, healthy, cooling, frozen, disabled, inFlightFull)）。
+	total, healthy, _, _, disabled, _ := p.CountsDetailed()
 	if total != 3 {
 		t.Fatalf("total=%d want 3", total)
 	}
@@ -35,7 +36,7 @@ func TestCountsPausedSeparate(t *testing.T) {
 	}
 
 	// --- 分开口径（面板概况）：禁用与暂停各自计数 ---
-	t2, h2, _, dis, pz, _ := p.CountsDetailedWithPaused()
+	t2, h2, _, _, dis, pz, _ := p.CountsDetailedWithPaused()
 	if t2 != total || h2 != healthy {
 		t.Errorf("两种口径的 total/healthy 必须一致：WithPaused=(%d,%d) Counts=(%d,%d)",
 			t2, h2, total, healthy)
@@ -53,9 +54,23 @@ func TestCountsPausedSeparate(t *testing.T) {
 	// --- 按域分组（/status 的 realm 建模）同样保持合并口径 ---
 	// 空 realm = 不加谓词，因此必须与 CountsDetailed 逐项一致；不能用面板的拆分口径
 	// 顺手改掉它。
-	totR, _, _, disR, _ := p.CountsDetailedForRealm("")
+	totR, _, _, _, disR, _ := p.CountsDetailedForRealm("")
 	if totR != total || disR != disabled {
 		t.Errorf("CountsDetailedForRealm(\"\") 应与 CountsDetailed 同口径：(%d,%d) vs (%d,%d)",
 			totR, disR, total, disabled)
+	}
+
+	// --- 本复刻扩展：低积分冻结同样单列（不与 cooling 混计）---
+	// 给 u1 设阈值使其跌破 → 立即冻结：frozen +1、healthy -1，且不影响 total/disabled。
+	p.SetFreezeThreshold("u1", 100) // credits 0 < 100 → 冻结
+	_, hf, _, fz, disF, _ := p.CountsDetailed()
+	if fz != 1 {
+		t.Errorf("CountsDetailed.frozen=%d want 1（u1 低积分冻结）", fz)
+	}
+	if hf != 0 {
+		t.Errorf("冻结后 healthy=%d want 0（三个号都不可选）", hf)
+	}
+	if disF != disabled {
+		t.Errorf("冻结不应影响 disabled 计数：%d vs %d", disF, disabled)
 	}
 }

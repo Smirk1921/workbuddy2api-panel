@@ -36,7 +36,7 @@ Smirk1921/workbuddy2api-panel               本仓库：复刻（个人自用增
 | 上游 | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | 在原始项目基础上重建的增强分支，独立维护 |
 | **本复刻** | [Smirk1921/workbuddy2api-panel](https://github.com/Smirk1921/workbuddy2api-panel) | 上游的 Fork，叠加下述自用改动 |
 
-**当前基线**：上游 `d66384d9`（**v1.13.0-panel**，含企业版能力门控、模型锁池视图、暂停选号单列统计等 17 个提交）。
+**当前基线**：上游 `6b31db6d`（v1.13.0-panel 之后，含到期卡片死锁修复、tool_call 脏数据剔除、prompt_cache_key 回退等 9 个提交）。
 
 ## 本复刻相对上游的差异
 

@@ -2999,46 +2999,17 @@ function expDaysLeft(dateStr, today) {
 
 /* 到期卡片折叠状态：默认收起（只留标题 + 一行摘要），展开态封顶 44vh 内滚。
    用户选择持久化跨会话记住——「账号池」的首要任务是看/管账号，明细按需展开。
-   localStorage 与 $ 都做存在性保护：前端 harness 的切片求值环境未必带 DOM 桩。 */
+   localStorage 与 $ 都做存在性保护：前端 harness 的切片求值环境未必带 DOM 桩。
+   （applyExpState/setExpOpen 定义在下方 renderExpirySnapshot 之后：harness 按区域
+   切片求值，落在那两个切片内才能被到期卡片的两个用例取到。） */
 const LS_EXP_OPEN = 'wb2api.expOpen';
 let expOpen = false;
 try { expOpen = localStorage.getItem(LS_EXP_OPEN) === '1'; } catch (e) { expOpen = false; }
 
-function applyExpState() {
-  const box = $('expBox');
-  // 上游的单测/冒烟 harness 会在无完整 DOM 桩的环境里直接调 renderExpiry——
-  // 那里 $('expBox') 可能返回一个没有 classList 的桩对象，必须整体跳过。
-  if (!box || !box.classList) return;
-  box.classList.toggle('collapsed', !expOpen);
-  const c = $('expCaret'); if (c) c.textContent = expOpen ? '▾' : '▸';
-}
 function setExpOpen(open, persist) {
   expOpen = open;
   if (persist) { try { localStorage.setItem(LS_EXP_OPEN, open ? '1' : '0'); } catch (e) {} }
   applyExpState();
-}
-
-/* 折叠态摘要（两种渲染共用）：最近到期日 + 30 天内到期账号数 + 查询失败数。
-   收起后仍保留告警信号，不必展开整屏长列表才知道「有没有要处理的」。
-   rows 由各渲染器从自己的数据源归一化：[{days, date, err}]；days=null 表示无到期信息。 */
-function renderExpSummary(rows) {
-  const sum = $('expSummary');
-  if (!sum) return;
-  let soonestDate = '', soonestDays = null, due30 = 0, errCnt = 0;
-  for (const r of rows) {
-    if (r.err) { errCnt++; continue; }
-    if (r.days === null || r.days === undefined) continue;
-    if (r.days <= 30) due30++;
-    if (soonestDays === null || r.days < soonestDays) { soonestDays = r.days; soonestDate = r.date; }
-  }
-  if (soonestDays === null) {
-    // 全部查询失败时不能报「无到期积分」——那是假信号。
-    sum.textContent = errCnt ? errCnt + ' 个账号查询失败（展开看明细）' : '30 天内无到期积分';
-  } else {
-    const w = soonestDays === 0 ? '今天' : soonestDays + ' 天后';
-    sum.textContent = '最近 ' + soonestDate + '（' + w + '）· ' + due30 + ' 个账号 30 天内有到期' +
-      (errCnt ? ' · ' + errCnt + ' 个查询失败' : '');
-  }
 }
 
 function renderExpiry(d) {
@@ -3172,7 +3143,46 @@ function renderExpirySnapshot(d) {
              date: new Date(ms).toISOString().slice(0, 10) };
   }));
   $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';
+  // 上游 #137 死锁修复的断言点：渲染后卡片必须不再 hidden（本复刻的折叠只收起明细体，
+  // 表头常驻可见，不会重现「按钮藏在隐藏卡片里点不到」的死锁）。
+  $('expBox').hidden = false;
   applyExpState();
+}
+
+/* 折叠态摘要（两种渲染共用）：最近到期日 + 30 天内到期账号数 + 查询失败数。
+   收起后仍保留告警信号，不必展开整屏长列表才知道「有没有要处理的」。
+   rows 由各渲染器从自己的数据源归一化：[{days, date, err}]；days=null 表示无到期信息。
+   位置：放在 renderExpirySnapshot 之后、loadExpiry 之前——前端 harness 按区域切片
+   求值（[renderExpiry…loadExpiry) 与 [renderExpirySnapshot…loadExpiry)），落在这两个
+   切片内才能被两个用例取到。 */
+function applyExpState() {
+  const box = $('expBox');
+  // 上游的单测/冒烟 harness 会在无完整 DOM 桩的环境里直接调 renderExpiry /
+  // renderExpirySnapshot——那里 $('expBox') 可能返回没有 classList 的桩对象，
+  // 必须整体跳过（也因此本函数在切片内不会读到切片外的 expOpen）。
+  if (!box || !box.classList) return;
+  box.classList.toggle('collapsed', !expOpen);
+  const c = $('expCaret'); if (c) c.textContent = expOpen ? '▾' : '▸';
+}
+
+function renderExpSummary(rows) {
+  const sum = $('expSummary');
+  if (!sum) return;
+  let soonestDate = '', soonestDays = null, due30 = 0, errCnt = 0;
+  for (const r of rows) {
+    if (r.err) { errCnt++; continue; }
+    if (r.days === null || r.days === undefined) continue;
+    if (r.days <= 30) due30++;
+    if (soonestDays === null || r.days < soonestDays) { soonestDays = r.days; soonestDate = r.date; }
+  }
+  if (soonestDays === null) {
+    // 全部查询失败时不能报「无到期积分」——那是假信号。
+    sum.textContent = errCnt ? errCnt + ' 个账号查询失败（展开看明细）' : '30 天内无到期积分';
+  } else {
+    const w = soonestDays === 0 ? '今天' : soonestDays + ' 天后';
+    sum.textContent = '最近 ' + soonestDate + '（' + w + '）· ' + due30 + ' 个账号 30 天内有到期' +
+      (errCnt ? ' · ' + errCnt + ' 个查询失败' : '');
+  }
 }
 
 async function loadExpiry(force) {

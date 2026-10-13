@@ -370,6 +370,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 }
 .state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
+/* 导入结果明细（跳过原因 / 警告）：多行文本，行数多时卡片内滚动，不撑破弹窗 */
+.imp-notes {
+  display: block; white-space: pre-wrap; word-break: break-all;
+  font: 12px var(--mono); line-height: 1.7; color: var(--ink-2);
+  max-height: 168px; overflow: auto; margin-top: 8px;
+  padding: 8px 10px; border-radius: 6px; background: var(--surface-2);
+}
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
@@ -1276,6 +1283,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
+        <div id="importNotes" class="imp-notes" hidden></div>
       </div>
     </div>
     <footer>

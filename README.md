@@ -106,11 +106,31 @@ Smirk1921/workbuddy2api-panel               本仓库：复刻（个人自用增
 30 天内到期账号数 · 查询失败数），展开态**封顶 44vh + 内部滚动**，展开/收起状态
 持久化到 localStorage；点「检查」自动展开。
 
+### 6. 账号导入修复：只有 access token 的凭证也能导入 —— 已向upstream提issue
+
+`POST /panel/api/import/cockpit` 原先硬性要求 `uid + access_token + refresh_token` 三件套，
+而 cockpit tools 对「只拿到 access token」的账号会导出 `refresh_token=""`、`expires_at=0`。
+这类记录与「字段全缺」合并进同一个跳过分支，导入结果是**成功 0 个、跳过 N 个**，且原因只写进
+`console.warn`——面板上一个字都不显示，用户只能看到"导入完成"却一个号都没进来。
+
+改动（`internal/panel/import.go` + `internal/panel/app.js` + `internal/server/handler.go`）：
+
+- **refresh_token 改为可选**。access token 自带 JWT `exp`，账号在到期前完全可用，没有理由拒绝；
+  过期时间按 `expires_at`（毫秒/秒自适应，旧实现无条件 ÷1000 会把「秒」除成 1970）→
+  JWT `exp` 依次回退；`uid` 缺失时回退 JWT 的 `sub`。
+- **跳过原因与警告上屏**。响应新增 `warnings`；前端新增明细区（✗ 跳过原因 / ! 警告），
+  「一个都没进来」按失败样式显示而不是"导入完成"。
+- **文件形态兼容**：顶层单对象、`{"accounts":[...]}` 信封、以及带 UTF-8 BOM 的文件
+  （Go 的 `encoding/json` 不吞 BOM，PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写 BOM）。
+- **凭证不可续期时明确禁用**：`handler` 在需要刷新但 `refresh_token` 为空时，按
+  `missing refresh_token (re-login required)` 禁用并返回 `credential_not_renewable`，
+  而不是每次请求都在刷新失败上白换一轮号、堆熔断计数。
+
 **完整差异对照**：[`linguo2625469:main...Smirk1921:main`](https://github.com/Smirk1921/workbuddy2api-panel/compare/linguo2625469:main...Smirk1921:main)
 
 ## 与上游同步
 
-本复刻用 rebase 保持「五个提交叠在上游之上」的线性结构：
+本复刻用 rebase 保持「上述提交叠在上游之上」的线性结构：
 
 ```bash
 git remote add upstream https://github.com/linguo2625469/workbuddy2api-panel.git  # 仅首次

@@ -1325,7 +1325,7 @@ function openAdd() {
   $('addPick').hidden = false;
   $('addLoad').hidden = true; $('addReady').hidden = true;
   $('addDone').hidden = true; $('addErr').hidden = true;
-  $('importDone').hidden = true; $('importErr').hidden = true;
+  $('importDone').hidden = true; $('importErr').hidden = true; $('importNotes').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
@@ -1385,7 +1385,7 @@ $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textCo
 $('importFile').onchange = async () => {
   const file = $('importFile').files[0];
   if (!file) return;
-  $('importDone').hidden = true; $('importErr').hidden = true;
+  $('importDone').hidden = true; $('importErr').hidden = true; $('importNotes').hidden = true;
   const fd = new FormData();
   fd.append('file', file);
   const h = {};
@@ -1395,11 +1395,15 @@ $('importFile').onchange = async () => {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
-    }
+    const imported = d.imported || 0, skipped = d.skipped || 0;
+    // 「一个都没进来」是失败而不是完成：按错误样式显示，否则用户只看到"成功 0 个"
+    // 却看不到任何原因（原因以前只进 console.warn，面板上完全不可见）。
+    const failed = imported === 0 && skipped > 0;
+    const el = failed ? $('importErr') : $('importDone');
+    el.hidden = false;
+    el.textContent = (failed ? '导入失败：' : '导入完成：') + '成功 ' + imported + ' 个' +
+      (skipped ? '，跳过 ' + skipped + ' 个' : '');
+    renderImportNotes(d.errors, d.warnings);
     loadOverview(true);
   } catch (e) {
     $('importErr').hidden = false;
@@ -1407,6 +1411,24 @@ $('importFile').onchange = async () => {
   }
   $('importFile').value = '';
 };
+
+/* 导入结果明细上屏：✗ 跳过原因、! 已导入但需知情的警告。
+   条数多时（整包导入常见几十条）截断成计数，明细仍完整打印在控制台。
+   用 textContent 而非 innerHTML——上游返回的原因串里可能带引号/尖括号。 */
+function renderImportNotes(errors, warnings) {
+  const box = $('importNotes');
+  if (!box) return;
+  const errs = errors || [], warns = warnings || [];
+  if (errs.length) console.warn('import errors:', errs);
+  if (warns.length) console.warn('import warnings:', warns);
+  if (!errs.length && !warns.length) { box.hidden = true; box.textContent = ''; return; }
+  const cap = 12;
+  const lines = errs.map(m => '✗ ' + m).concat(warns.map(m => '! ' + m));
+  const shown = lines.slice(0, cap);
+  if (lines.length > cap) shown.push('…还有 ' + (lines.length - cap) + ' 条（明细见控制台）');
+  box.hidden = false;
+  box.textContent = shown.join('\n');
+}
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;

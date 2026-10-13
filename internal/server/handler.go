@@ -793,6 +793,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
+			// 无 refresh token：刷新必然失败，先按「凭证不可续期」明确禁用并给出
+			// 可操作原因（重新登录/重新导入），避免该账号长期留在候选里被反复选中、
+			// 每次都在刷新失败上白换一轮号并堆熔断计数。
+			if acct.RefreshTokenValue() == "" {
+				lastErr = errNoRefreshToken
+				h.cfg.Pool.Disable(acct.UID, "missing refresh_token (re-login required)")
+				fail(acct.UID)
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转
+				}
+				continue
+			}
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				lastErr = err
 				var ue *upstream.Error
@@ -1134,6 +1146,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
 	}
+	// 凭证不可续期（只导入了 access token、没有 refresh token）：与"没有可用账号"
+	// 区分——需要重新登录/重新导入，而不是等一会儿重试。
+	if errors.Is(lastErr, errNoRefreshToken) {
+		code = "credential_not_renewable"
+		msg = "account credentials cannot be renewed (missing refresh_token), re-login or re-import the account"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
@@ -1284,6 +1302,13 @@ func rotateBackoff(i int, ctx context.Context) bool {
 
 // errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
 var errUpstreamTimeout = errors.New("upstream timeout")
+
+// errNoRefreshToken 账号只有 access token、没有 refresh token（典型来源：cockpit
+// tools 对「仅拿到 access token」的账号导出的 refresh_token="" 文件）。
+// 这类凭证在 access token 到期后**不可续期**，刷新注定失败（upstream.RefreshToken
+// 直接返回 "no refreshToken"）。选中它时按「凭证不可用」明确禁用并给出可操作原因，
+// 而不是喂熔断计数 + 每次请求白换一轮号。
+var errNoRefreshToken = errors.New("missing refresh_token (re-login required)")
 
 // isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。

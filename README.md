@@ -126,6 +126,28 @@ Smirk1921/workbuddy2api-panel               本仓库：复刻（个人自用增
   `missing refresh_token (re-login required)` 禁用并返回 `credential_not_renewable`，
   而不是每次请求都在刷新失败上白换一轮号、堆熔断计数。
 
+### 7. 成长任务周期清扫（补领卡在 4000 以下的积分）
+
+新号跑完成长任务，进度其实已经上报生效（服务端 progress 达标），但积分停在
+**2000/2100/2300 上不去 4000**——差的正是「领奖」这一步。上游只有
+`schedule.growth_hours`（默认 01:00）的成长队列，而它只处理「被扫进队列的任务」，
+两类场景覆盖不到：
+
+- 你在代理里**真实对话点亮的任务**——服务端进度自己涨，面板并不知情，没人去 claim；
+- 历史上**漏领的达标任务**——任务早已完成，只是没人领。
+
+新增 `schedule.task_sweep_enabled`（默认 true）+ `schedule.task_sweep_minutes`
+（默认 15）的独立周期作业（`internal/panel/tasksweep.go` + scheduler 的
+`StartTaskSweep`，与 `balance_refresh` 同款分钟级 ticker，支持在线改配置即时生效）：
+
+1. accept 所有 `not_accepted` 的待办任务（默认口径与小程序口径分别提交）；
+2. claim 所有「进度达标且未领取」的任务（mp 码走 mp 口径，其余走 Web 口径）。
+
+**全幂等**（accept 幂等；claim 重复领返回 `already_claimed` 不计新增），**不跑任何行为
+链路**（那是「成长任务自动执行」的职责），所以开销很小：每账号 2 次列表 + 少量领奖请求。
+领奖判据只用 progress（`Claimable`）——`accept_status` 会短暂转 `completed` 再回滚，
+拿它当依据会误领。global 与企业版账号不发任何上游请求。
+
 **完整差异对照**：[`linguo2625469:main...Smirk1921:main`](https://github.com/Smirk1921/workbuddy2api-panel/compare/linguo2625469:main...Smirk1921:main)
 
 ## 与上游同步

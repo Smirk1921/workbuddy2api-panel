@@ -61,6 +61,12 @@ type Config struct {
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+
+	// SweepHook 成长任务清扫回调（panel.RunTaskSweepOnce：accept 待接受 + 补领
+	// 「进度达标但没人领」的奖）。与 GrowthHook 同款事后挂载，但走**分钟级间隔**
+	// （StartTaskSweep 独立 ticker）而非小时制排程：漏领是分钟级就能收敛的事，
+	// 且用户在代理里真实对话点亮的任务随时可能达标，不该等到次日 01:00。
+	SweepHook func()
 }
 
 // Scheduler 调度器。
@@ -73,15 +79,20 @@ type Scheduler struct {
 	adoptTried map[string]string
 
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
-	// rearmSchedule/rearmBalance 是「排程已变，立即重算」通知：Run 与余额刷新循环各自消费，
-	// 分别用独立 channel（同 channel 被两个 select 消费会丢信号）。
+	// rearmSchedule/rearmBalance/rearmSweep 是「排程已变，立即重算」通知：各循环分别消费，
+	// 各用独立 channel（同 channel 被两个 select 消费会丢信号）。
 	schedMu       sync.Mutex
 	rearmSchedule chan struct{}
 	rearmBalance  chan struct{}
+	rearmSweep    chan struct{}
 
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+
+	// sweepInterval 成长任务清扫间隔（纳秒，0=暂停）。与 balanceInterval 同款：
+	// atomic 读写 + rearmSweep 立即重算，SetSweepInterval 热改。
+	sweepInterval atomic.Int64
 }
 
 // New 构建。
@@ -106,6 +117,7 @@ func New(cfg Config) *Scheduler {
 		adoptTried:    make(map[string]string),
 		rearmSchedule: make(chan struct{}, 1),
 		rearmBalance:  make(chan struct{}, 1),
+		rearmSweep:    make(chan struct{}, 1),
 	}
 }
 
@@ -138,6 +150,13 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 func (s *Scheduler) SetGrowthHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.GrowthHook = fn
+	s.schedMu.Unlock()
+}
+
+// SetSweepHook 挂载/替换成长任务清扫回调（同 SetGrowthHook：panel 事后接线）。
+func (s *Scheduler) SetSweepHook(fn func()) {
+	s.schedMu.Lock()
+	s.cfg.SweepHook = fn
 	s.schedMu.Unlock()
 }
 
@@ -685,4 +704,58 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// StartTaskSweep 后台周期性成长任务清扫（独立 ticker goroutine，ctx 取消即停）。
+// interval<=0 不启动（schedule.task_sweep_enabled=false 时 main 不调用即可）。
+// 与余额刷新同款「独立于 Run 小时制排程」的理由：漏领/待接受是分钟级就能收敛的事，
+// 不值得为它扩展 nextFire 的粒度。运行期可用 SetSweepInterval 热改间隔（下一轮生效）。
+func (s *Scheduler) StartTaskSweep(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	s.sweepInterval.Store(int64(interval))
+	go func() {
+		var logged time.Duration
+		for {
+			cur := time.Duration(s.sweepInterval.Load())
+			if cur != logged {
+				log.Printf("scheduler: 成长任务清扫每 %s（暂停中显示 0s）", cur)
+				logged = cur
+			}
+			if cur <= 0 {
+				// 被热改暂停：等重排通知（重新启用时唤醒）或退出。
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.rearmSweep:
+					continue
+				}
+			}
+			timer := time.NewTimer(cur)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.rearmSweep:
+				timer.Stop() // 间隔已变：立刻按新值重算
+			case <-timer.C:
+				s.schedMu.Lock()
+				hook := s.cfg.SweepHook
+				s.schedMu.Unlock()
+				if hook != nil {
+					hook()
+				}
+			}
+		}
+	}()
+}
+
+// SetSweepInterval 热改任务清扫间隔；<=0 表示暂停循环（面板关闭该开关时）。
+func (s *Scheduler) SetSweepInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.sweepInterval.Store(int64(d))
+	poke(s.rearmSweep)
 }

@@ -106,6 +106,20 @@ type Config struct {
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
+
+		// 成长任务周期清扫：accept 待接受的任务 + 补领「进度已达标但没人去领」的奖。
+		//
+		// 补的是既有链路的一个真空：schedule.growth_hours 的成长队列只处理「被扫进
+		// 队列的任务」，而（a）用户在代理里真实对话点亮的任务——服务端进度自己涨、
+		// 面板不知情；（b）历史上领奖端点故障期间漏领的达标任务——任务早已完成，
+		// 只是没人领。两者都会让积分卡在 2000/2100/2300 上不去 4000。
+		//
+		// 清扫全幂等（accept 幂等；claim 重复领返回 already_claimed 不计新增），
+		// 开销为每账号 2 次列表 + 少量领奖请求，故默认 15 分钟一轮。
+		// 缺省 true（与 balance_refresh_enabled 同口径：老配置也会开启——卡在
+		// 4000 以下的号正是没人补领的那批）。需要「完全不动上游」的部署显式置 false。
+		TaskSweepEnabled bool `json:"task_sweep_enabled"` // 缺省 true；false = 关闭
+		TaskSweepMinutes int  `json:"task_sweep_minutes"` // 缺省 15；<=0 回落 15
 	} `json:"schedule"`
 
 	Global struct {
@@ -223,6 +237,7 @@ type Config struct {
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -264,6 +279,8 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	c.Schedule.TaskSweepEnabled = true
+	c.Schedule.TaskSweepMinutes = 15
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -590,6 +607,13 @@ func (c *Config) normalize() error {
 			c.Schedule.BalanceRefreshMinutes = 5
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
+	}
+	// 成长任务清扫：同口径——启用时 minutes<=0 回落默认 15；关闭时 interval 保持 0。
+	if c.Schedule.TaskSweepEnabled {
+		if c.Schedule.TaskSweepMinutes <= 0 {
+			c.Schedule.TaskSweepMinutes = 15
+		}
+		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err

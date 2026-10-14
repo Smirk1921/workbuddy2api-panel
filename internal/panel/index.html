@@ -1020,6 +1020,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
             </div>
             <div class="hr"></div>
+            <div class="grid2">
+              <div class="switch"><span class="lb">成长任务周期清扫</span>
+                <input type="checkbox" name="task_sweep_enabled" checked></div>
+              <label class="fld"><span class="lb">清扫间隔（分钟）</span>
+                <input name="task_sweep_minutes" type="number" min="1" placeholder="15">
+                <span class="hint">定时「接受待接受的任务 + 补领已达标但没人领的奖」。补的是自动执行覆盖不到的两类：你在代理里真实对话点亮的任务，以及历史上漏领的达标任务（积分卡在 2000/2100/2300 上不去 4000 就是这个原因）。全幂等，重复领不重复计数。</span></label>
+            </div>
+            <div class="hr"></div>
             <div class="switch"><span class="lb">保号任务覆盖已禁用账号</span>
               <input type="checkbox" name="include_disabled_in_tasks"></div>
             <div class="hint">禁用只关选号：打开后已禁用的账号仍会签到 / 活跃上报 / 保活 / 刷新余额（依旧不参与选号）。适合「一次只放开一个账号、用禁用做流量开关」的轮换养号用法，默认关闭。<br>若只想让<b>单个</b>账号临时退出选号但保留保号，直接用账号行的「<b>暂停选号</b>」按钮（账号级，无需打开本开关）。</div>

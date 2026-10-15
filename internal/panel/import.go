@@ -16,25 +16,62 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
+// flexString 宽容字符串：同一个字段在不同导出方那里写法不同——cockpit tools 把
+// status 写成字符串（"active"），另一些导出方写成数字（1）。Go 的 encoding/json 对
+// 类型不匹配是**硬错误**，一个字段不符就让整份文件导入失败，报错形如
+//
+//	invalid json: json: cannot unmarshal number into Go struct field cockpitAccount.status of type string
+//
+// 用户看到这个完全无从下手（既不知道是哪个文件、也不知道该改什么）。这里对
+// string / number / bool / null 一律收下并转成字符串：导入端只把这些字段当提示
+// 用（真正的判据是 uid/access_token 与 domain 推断的 realm），类型宽松没有风险。
+type flexString string
+
+func (s *flexString) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*s = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var v string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		*s = flexString(v)
+		return nil
+	}
+	// 数字 / true / false 等：保留字面量文本（数字 1 → "1"）。
+	*s = flexString(b)
+	return nil
+}
+
+// trim 取修剪后的值——导入端所有字段都是「先 TrimSpace 再用」。
+func (s flexString) trim() string { return strings.TrimSpace(string(s)) }
+
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
+//
+// 文本字段一律用 flexString（见上）：导出方把 id/uid/status 写成数字是实测存在的，
+// 用 string 会让整份文件报废。数值字段保持 int64（int 类型不符同样会报错，但实测
+// 各导出方在时间戳上都是数字，且 convertInt 已做量级自适应）。
 type cockpitAccount struct {
-	ID             string `json:"id"`
-	Email          string `json:"email"`
-	UID            string `json:"uid"`
-	Nickname       string `json:"nickname"`
-	AccessToken    string `json:"access_token"`
-	RefreshToken   string `json:"refresh_token"`
-	TokenType      string `json:"token_type"`
-	ExpiresAt      int64  `json:"expires_at"`
-	Domain         string `json:"domain"`
-	DosageNotify   string `json:"dosage_notify_code"`
-	PaymentType    string `json:"payment_type"`
-	Status         string `json:"status"`
-	UsageUpdatedAt int64  `json:"usage_updated_at"`
-	LastCheckin    int64  `json:"last_checkin_time"`
-	CheckinStreak  int    `json:"checkin_streak"`
-	CreatedAt      int64  `json:"created_at"`
-	LastUsed       int64  `json:"last_used"`
+	ID             flexString `json:"id"`
+	Email          flexString `json:"email"`
+	UID            flexString `json:"uid"`
+	Nickname       flexString `json:"nickname"`
+	AccessToken    flexString `json:"access_token"`
+	RefreshToken   flexString `json:"refresh_token"`
+	TokenType      flexString `json:"token_type"`
+	ExpiresAt      int64      `json:"expires_at"`
+	Domain         flexString `json:"domain"`
+	DosageNotify   flexString `json:"dosage_notify_code"`
+	PaymentType    flexString `json:"payment_type"`
+	Status         flexString `json:"status"`
+	UsageUpdatedAt int64      `json:"usage_updated_at"`
+	LastCheckin    int64      `json:"last_checkin_time"`
+	CheckinStreak  int        `json:"checkin_streak"`
+	CreatedAt      int64      `json:"created_at"`
+	LastUsed       int64      `json:"last_used"`
 }
 
 // importPlan 单条 cockpit 记录归一化后的导入方案（planImportAccount 的产物）。
@@ -78,12 +115,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accounts, err := decodeCockpitAccounts(raw)
+	records, err := decodeCockpitAccounts(raw)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if len(accounts) == 0 {
+	if len(records) == 0 {
 		writeErr(w, http.StatusBadRequest, "empty accounts array")
 		return
 	}
@@ -91,11 +128,17 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	var imported, skipped int
 	var errs, warns []string
 
-	for _, acc := range accounts {
-		plan, err := planImportAccount(acc, p.cfg.AuthDir)
+	for i, rec := range records {
+		// 单条记录本身类型不符：只跳过这一条（带序号，便于用户定位到具体哪一条）。
+		if rec.err != nil {
+			skipped++
+			errs = append(errs, fmt.Sprintf("第 %d 条记录解析失败：%v", i+1, rec.err))
+			continue
+		}
+		plan, err := planImportAccount(rec.acc, p.cfg.AuthDir)
 		if err != nil {
 			skipped++
-			errs = append(errs, err.Error())
+			errs = append(errs, fmt.Sprintf("第 %d 条：%v", i+1, err))
 			continue
 		}
 		if err := plan.auth.SaveAtomic(); err != nil {
@@ -136,7 +179,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		imported++
 	}
 
-	total := len(accounts)
+	total := len(records)
 	log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d warnings=%d",
 		total, imported, skipped, len(warns))
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -149,6 +192,13 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// decodedAccount 一条已解码（或解码失败）的记录。err 非 nil 表示**该条**类型不符，
+// 只跳过这一条并把原因回报给面板，不影响同一文件里的其他账号。
+type decodedAccount struct {
+	acc cockpitAccount
+	err error
+}
+
 // decodeCockpitAccounts 把上传的 JSON 归一化为账号列表。
 //
 // 兼容三种实际形态（此前只认第一种，其余全部以「invalid json」告终）：
@@ -159,18 +209,19 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 // 另外剥掉 UTF-8 BOM：Go 的 encoding/json **不吞 BOM**，而 Windows PowerShell 5.1
 // 的 `Set-Content -Encoding utf8` 会写 BOM——带 BOM 的文件在这里会得到
 // "invalid character 'ï' looking for beginning of value"，用户完全无从下手。
-func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
+//
+// **逐条解码**：先只解出数组元素（[]json.RawMessage），再逐条解成 cockpitAccount。
+// 这样某一条记录字段类型不符时只跳过该条并回报「第 N 条：…」，而不是像整份一次性
+// 解码那样让整个文件报废——一个字段写错就丢掉几十个账号，用户还得自己二分定位。
+// 返回的 error 只表示**结构性**问题（不是数组/对象、空文件、语法错误）。
+func decodeCockpitAccounts(raw []byte) ([]decodedAccount, error) {
 	b := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
 	if len(b) == 0 {
 		return nil, errors.New("文件为空")
 	}
 	switch b[0] {
 	case '[':
-		var list []cockpitAccount
-		if err := json.Unmarshal(b, &list); err != nil {
-			return nil, err
-		}
-		return list, nil
+		return decodeRecords(b)
 	case '{':
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(b, &probe); err != nil {
@@ -178,21 +229,36 @@ func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
 		}
 		for _, key := range []string{"accounts", "data", "list", "items"} {
 			if v, ok := probe[key]; ok && len(v) > 0 && v[0] == '[' {
-				var list []cockpitAccount
-				if err := json.Unmarshal(v, &list); err != nil {
-					return nil, err
-				}
-				return list, nil
+				return decodeRecords(v)
 			}
 		}
 		var one cockpitAccount
 		if err := json.Unmarshal(b, &one); err != nil {
 			return nil, err
 		}
-		return []cockpitAccount{one}, nil
+		return []decodedAccount{{acc: one}}, nil
 	default:
 		return nil, errors.New("顶层需为账号数组 [{...}]")
 	}
+}
+
+// decodeRecords 逐条解码数组元素，收集每条的失败原因（不因单条失败而中止）。
+// 数组本身语法坏了仍按**结构性**错误返回——那是文件级问题，报成「第 1 条失败」会误导。
+func decodeRecords(arr []byte) ([]decodedAccount, error) {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(arr, &raws); err != nil {
+		return nil, err
+	}
+	out := make([]decodedAccount, 0, len(raws))
+	for _, r := range raws {
+		var a cockpitAccount
+		if err := json.Unmarshal(r, &a); err != nil {
+			out = append(out, decodedAccount{err: err})
+			continue
+		}
+		out = append(out, decodedAccount{acc: a})
+	}
+	return out, nil
 }
 
 // planImportAccount 把一条 cockpit 记录归一化为待落盘的凭证。纯函数：不碰池、不碰
@@ -209,13 +275,13 @@ func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
 // 无 refresh_token 时给出警告：access token 到期后无法自动续期，届时 handler 会
 // 明确禁用该账号并提示重新登录（而不是每次请求都在刷新失败上打转）。
 func planImportAccount(acc cockpitAccount, authDir string) (importPlan, error) {
-	at := strings.TrimSpace(acc.AccessToken)
+	at := acc.AccessToken.trim()
 	if at == "" {
 		return importPlan{}, fmt.Errorf("missing access_token (id=%s)", acc.ID)
 	}
 	hints := jwtClaims(at)
 
-	uid := strings.TrimSpace(acc.UID)
+	uid := acc.UID.trim()
 	if uid == "" {
 		uid = strings.TrimSpace(hints.Sub)
 	}
@@ -226,7 +292,7 @@ func planImportAccount(acc cockpitAccount, authDir string) (importPlan, error) {
 		return importPlan{}, fmt.Errorf("invalid uid %q (id=%s)", uid, acc.ID)
 	}
 
-	rt := strings.TrimSpace(acc.RefreshToken)
+	rt := acc.RefreshToken.trim()
 	expiresAt := normalizeExpiry(acc.ExpiresAt)
 	if expiresAt <= 0 {
 		expiresAt = hints.Exp
@@ -246,23 +312,23 @@ func planImportAccount(acc cockpitAccount, authDir string) (importPlan, error) {
 			"uid=%s: 无法确定 access token 过期时间（expires_at 无效且非 JWT），进池后立即刷新", uid))
 	}
 
-	nickname := strings.TrimSpace(acc.Nickname)
+	nickname := acc.Nickname.trim()
 	if nickname == "" {
-		nickname = acc.Email
+		nickname = acc.Email.trim()
 	}
 
 	a := &auth.Auth{
 		AccessToken:  at,
 		RefreshToken: rt,
 		ExpiresAt:    expiresAt,
-		Domain:       acc.Domain,
+		Domain:       acc.Domain.trim(),
 		UID:          uid,
 		Nickname:     nickname,
 		FilePath:     filepath.Join(authDir, fmt.Sprintf("workbuddy-%s.json", uid)),
 	}
 
 	// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
-	realm := auth.ResolveRealm("", acc.Domain)
+	realm := auth.ResolveRealm("", acc.Domain.trim())
 	if realm == "global" {
 		if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
 			return importPlan{}, fmt.Errorf("uid=%s: set realm failed: %v", uid, err)

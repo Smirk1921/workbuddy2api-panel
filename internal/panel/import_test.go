@@ -81,6 +81,60 @@ func TestDecodeCockpitAccounts(t *testing.T) {
 	}
 }
 
+// 回归：不同导出方把同一字段写成不同类型。实测现场是某个导出方把 status 写成数字
+// （1）而 cockpit tools 写字符串（"active"）——Go 的 json 对类型不匹配是硬错误，
+// 旧实现（字符串字段 + 整份一次性解码）会让**整份文件**导入失败：
+//
+//	invalid json: json: cannot unmarshal number into Go struct field cockpitAccount.status of type string
+func TestDecodeCockpitAccountsTolerantTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"status 为数字", `[{"uid":"u1","access_token":"at","status":1}]`},
+		{"status 为字符串", `[{"uid":"u1","access_token":"at","status":"active"}]`},
+		{"status 为 null", `[{"uid":"u1","access_token":"at","status":null}]`},
+		{"uid 为数字", `[{"uid":12345,"access_token":"at"}]`},
+		{"id/nickname 为数字", `[{"id":999,"uid":"u1","nickname":888,"access_token":"at"}]`},
+		{"token_type 为布尔", `[{"uid":"u1","access_token":"at","token_type":true}]`},
+		{"global 域 + 数字 status（实测现场）", `[{"id":"7a3b2b15-f0dc-4afa-876b-c82d5ec2af14","uid":"7a3b2b15-f0dc-4afa-876b-c82d5ec2af14","email":"","nickname":"hintace2u","access_token":"eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjE4MjM1OTY2NjZ9.sig","refresh_token":"rt","token_type":"Bearer","expires_at":1823596666000,"domain":"www.workbuddy.ai","status":1}]`},
+	}
+	for _, c := range cases {
+		got, err := decodeCockpitAccounts([]byte(c.in))
+		if err != nil {
+			t.Errorf("%s: 不该因字段类型而报错: %v", c.name, err)
+			continue
+		}
+		if len(got) != 1 || got[0].err != nil {
+			t.Errorf("%s: 应成功解出 1 条，得到 %d 条 err=%v", c.name, len(got), got[0].err)
+		}
+	}
+}
+
+// 一条记录坏了不能拖垮整份文件：其余账号仍要正常导入。
+func TestDecodeCockpitAccountsBadRecordDoesNotKillFile(t *testing.T) {
+	// 第 2 条是字符串（不是对象）→ 该条解码失败；第 1、3 条正常。
+	in := `[{"uid":"u1","access_token":"at"},"oops",{"uid":"u3","access_token":"at"}]`
+	got, err := decodeCockpitAccounts([]byte(in))
+	if err != nil {
+		t.Fatalf("不该是结构性错误: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("应解出 3 条（含 1 条失败），得到 %d", len(got))
+	}
+	ok, bad := 0, 0
+	for _, r := range got {
+		if r.err != nil {
+			bad++
+		} else {
+			ok++
+		}
+	}
+	if ok != 2 || bad != 1 {
+		t.Errorf("期望 2 成功 1 失败，得到 %d 成功 %d 失败", ok, bad)
+	}
+}
+
 // 核心回归：cockpit tools 对「只拿到 access token」的账号导出 refresh_token="" 且
 // expires_at=0。旧实现把这类记录与「字段全缺」合并跳过，导入必然 0 成功。
 func TestPlanImportAccountWithoutRefreshToken(t *testing.T) {
@@ -88,11 +142,11 @@ func TestPlanImportAccountWithoutRefreshToken(t *testing.T) {
 	at := testJWT(t, map[string]any{"exp": exp, "sub": "08cfc50d-9ed4-4dde-97d4-9b3e70e28d24"})
 
 	plan, err := planImportAccount(cockpitAccount{
-		ID:          "08cfc50d-9ed4-4dde-97d4-9b3e70e28d24",
-		UID:         "08cfc50d-9ed4-4dde-97d4-9b3e70e28d24",
-		Nickname:    "63358934",
-		AccessToken: at,
-		Domain:      "www.workbuddy.cn",
+		ID:          flexString("08cfc50d-9ed4-4dde-97d4-9b3e70e28d24"),
+		UID:         flexString("08cfc50d-9ed4-4dde-97d4-9b3e70e28d24"),
+		Nickname:    flexString("63358934"),
+		AccessToken: flexString(at),
+		Domain:      flexString("www.workbuddy.cn"),
 	}, t.TempDir())
 	if err != nil {
 		t.Fatalf("无 refresh_token 的账号必须可导入，实际报错: %v", err)
@@ -123,10 +177,10 @@ func TestPlanImportAccountFallbacks(t *testing.T) {
 	fileExp := time.Now().Add(72 * time.Hour).Unix()
 
 	plan, err := planImportAccount(cockpitAccount{
-		AccessToken:  at,
+		AccessToken:  flexString(at),
 		ExpiresAt:    fileExp * 1000, // 毫秒
-		RefreshToken: "rt",
-		Domain:       "www.workbuddy.cn",
+		RefreshToken: flexString("rt"),
+		Domain:       flexString("www.workbuddy.cn"),
 	}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -148,9 +202,9 @@ func TestPlanImportAccountRejects(t *testing.T) {
 		acc  cockpitAccount
 		want string
 	}{
-		{"缺 access_token", cockpitAccount{UID: "u1"}, "missing access_token"},
-		{"缺 uid 且 JWT 无 sub", cockpitAccount{AccessToken: "not-a-jwt"}, "missing uid"},
-		{"uid 含路径字符", cockpitAccount{UID: "a/../b", AccessToken: "x"}, "invalid uid"},
+		{"缺 access_token", cockpitAccount{UID: flexString("u1")}, "missing access_token"},
+		{"缺 uid 且 JWT 无 sub", cockpitAccount{AccessToken: flexString("not-a-jwt")}, "missing uid"},
+		{"uid 含路径字符", cockpitAccount{UID: flexString("a/../b"), AccessToken: flexString("x")}, "invalid uid"},
 	}
 	for _, c := range cases {
 		_, err := planImportAccount(c.acc, t.TempDir())

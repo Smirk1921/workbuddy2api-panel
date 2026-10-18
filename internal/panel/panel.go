@@ -12,6 +12,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -158,6 +159,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
+	// 批量操作：显式 uid 列表（表格多选）与组作用域共用 batch.go 的执行器。
+	p.mux.HandleFunc("POST /panel/api/accounts/batch", p.withAuth(p.accountsBatch))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
@@ -729,26 +732,32 @@ func (p *Panel) groupsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "groups": groups, "has_ungrouped": hasUngrouped})
 }
 
-// groupTarget 批量操作的作用域解析：返回命中的账号状态列表与规范化后的目标组名。
-// group=="__all__" → 全部账号；group=="__ungrouped__" → 仅未分组；否则仅该组账号。
-// group 为空时 400（必须显式指定作用域，避免把「全量」当成缺省值误伤）。
-func (p *Panel) groupTargets(group string) ([]pool.Status, string, error) {
-	if group == "" {
-		return nil, group, errMissingGroup
-	}
-	if group == "__ungrouped__" {
-		group = "" // 归一化为空组名的谓词
+// groupTargets 批量操作的作用域解析：返回命中的账号状态列表。
+// scope=="__all__" → 全部账号；scope=="__ungrouped__" → 仅未分组；否则仅该组账号。
+// scope 为空时 400（必须显式指定作用域，避免把「全量」当成缺省值误伤）。
+//
+// 注意：**不回写 scope**。remove 的 confirm 需要与原始作用域串比对，
+// 早先在这里把 "__ungrouped__" 归一化成 ""，导致「未分组」的批量移除永远 400。
+func (p *Panel) groupTargets(scope string) ([]pool.Status, error) {
+	if scope == "" {
+		return nil, errMissingGroup
 	}
 	var out []pool.Status
 	for _, st := range p.cfg.Pool.List() {
 		switch {
-		case group == "__all__":
+		case scope == pool.GroupScopeAll:
 			out = append(out, st)
-		case st.Group == group:
-			out = append(out, st)
+		case scope == pool.GroupScopeUngrouped:
+			if st.Group == "" {
+				out = append(out, st)
+			}
+		default:
+			if st.Group == scope {
+				out = append(out, st)
+			}
 		}
 	}
-	return out, group, nil
+	return out, nil
 }
 
 var errMissingGroup = &panelError{msg: "group must not be empty (use __all__ / __ungrouped__ / 组名)"}
@@ -757,27 +766,29 @@ type panelError struct{ msg string }
 
 func (e *panelError) Error() string { return e.msg }
 
-// groupAction 对一组账号批量执行操作：priority / threshold / freeze / revive / remove。
-// 全部走已有的单账号方法（SetPriority/SetFreezeThreshold/Disable/Revive/Remove），
-// 与面板行内按钮完全同语义——批量只是「在作用域内循环调用」，不引入新的池行为。
+// groupAction 对一组账号批量执行操作（作用域：__all__ / __ungrouped__ / 组名）。
 //
-// 保护（不可逆操作 remove）：body 必须带 confirm（字符串）且与目标组名（或 "__all__"）
-// 完全一致——强制前端弹「输入组名确认」对话框，挡住误点；group=="__all__" 时要求
-// 输入 "__all__"（防止把「移除一组」误选成「移除全部」）。
+// 与 POST /panel/api/accounts/batch 共用 applyBatchAction（见 batch.go），
+// 语义只有一份实现。动作集与账号行按钮 1:1：pause/resume/disable/revive/
+// threshold/priority/group/remove（`freeze` 是 disable 的兼容别名）。
+//
+// 保护（不可逆操作 remove）：body 必须带 confirm（字符串）且与**原始作用域串**逐字一致
+// ——强制前端弹「输入组名确认」对话框，挡住误点；scope=="__all__" 时要求输入 "__all__"。
 func (p *Panel) groupAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	group := r.PathValue("group")
-	targets, group, err := p.groupTargets(group)
+	rawScope := r.PathValue("group")
+	targets, err := p.groupTargets(rawScope)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	var body struct {
-		Value   *float64 `json:"value"` // threshold 用
+		Value   *float64 `json:"value"` // threshold 用；priority 用 0/1
+		Group   *string  `json:"group"` // group 用（目标组名）
 		Confirm *string  `json:"confirm"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body) // body 可为空（priority/freeze/revive 不需要）
+	_ = json.NewDecoder(r.Body).Decode(&body) // body 可为空（priority/disable/revive 不需要）
 
 	names := func() []string {
 		var ns []string
@@ -790,75 +801,22 @@ func (p *Panel) groupAction(w http.ResponseWriter, r *http.Request) {
 		}
 		return ns
 	}
-	log.Printf("panel: group action=%s group=%q 命中 %d 个账号: %s", action, group, len(targets), strings.Join(names(), ", "))
+	log.Printf("panel: group action=%s scope=%q 命中 %d 个账号: %s",
+		action, rawScope, len(targets), strings.Join(names(), ", "))
 
-	affected := 0
-	switch action {
-	case "priority":
-		on := true
-		if body.Value != nil {
-			on = *body.Value != 0
+	res, err := p.applyBatchAction(action, targets,
+		batchOpt{Value: body.Value, Group: body.Group, Confirm: body.Confirm}, rawScope)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errUnknownBatchAction) {
+			status = http.StatusNotFound
 		}
-		for _, st := range targets {
-			p.cfg.Pool.SetPriority(st.UID, on)
-			affected++
-		}
-	case "threshold":
-		if body.Value == nil {
-			writeErr(w, http.StatusBadRequest, "threshold action requires body {value: number}")
-			return
-		}
-		th := int64(*body.Value)
-		if th < 0 {
-			writeErr(w, http.StatusBadRequest, "threshold must be >= 0")
-			return
-		}
-		for _, st := range targets {
-			p.cfg.Pool.SetFreezeThreshold(st.UID, th)
-			affected++
-		}
-	case "freeze":
-		for _, st := range targets {
-			p.cfg.Pool.Disable(st.UID, "group freeze (panel)")
-			affected++
-		}
-	case "revive":
-		for _, st := range targets {
-			p.cfg.Pool.Revive(st.UID)
-			affected++
-		}
-	case "remove":
-		// 不可逆：要求输入组名确认。
-		if body.Confirm == nil || *body.Confirm != group {
-			writeErr(w, http.StatusBadRequest, `remove requires body {confirm: "<组名或 __all__>"}，必须逐字匹配以确认不可逆操作`)
-			return
-		}
-		var fileErrs []string
-		for _, st := range targets {
-			a := p.cfg.Pool.Remove(st.UID)
-			if a == nil {
-				continue
-			}
-			affected++
-			if a.FilePath != "" {
-				if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
-					fileErrs = append(fileErrs, st.UID+": "+err.Error())
-				}
-			}
-		}
-		resp := map[string]any{"ok": true, "affected": affected, "removed": affected}
-		if len(fileErrs) > 0 {
-			resp["file_errors"] = fileErrs
-		}
-		log.Printf("panel: group remove group=%q removed=%d file_errors=%d", group, affected, len(fileErrs))
-		writeJSON(w, http.StatusOK, resp)
-		return
-	default:
-		writeErr(w, http.StatusNotFound, "unknown action: "+action+"（支持 priority/threshold/freeze/revive/remove）")
+		writeErr(w, status, err.Error())
 		return
 	}
-	log.Printf("panel: group action=%s group=%q affected=%d", action, group, affected)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": affected})
+	log.Printf("panel: group action=%s scope=%q affected=%d changed=%d skipped=%d",
+		action, rawScope, res.Affected, res.Changed, res.Skipped)
+	writeJSON(w, http.StatusOK, batchResponse(res))
 }
 
 // ---------------------------------------------------------------------------

@@ -372,6 +372,10 @@ setTimeout(() => {
    以当前选中的作用域为准。 */
 let groupScope = '__all__';
 
+/* 批量勾选集合：必须跨 5 秒轮询存活（renderAccounts 每次按 uid 还原勾选态，
+   否则一刷新就全丢）。池里已消失的 uid 在渲染时剔除，避免「幽灵选中」。 */
+const selUids = new Set();
+
 function groupOf(s) { return s.group || ''; }
 function groupInScope(s) {
   if (groupScope === '__all__') return true;
@@ -399,29 +403,86 @@ function renderGroupBar() {
   updateGroupScopeNote();
 }
 
-/* 作用域计数提示（右侧 "N 个账号"）。 */
+/* 作用域 / 选择提示：上行显示分组维度，批量行显示本次会作用到谁。
+   有勾选 → 只作用于勾选集合；无勾选 → 作用于整个分组作用域。 */
 function updateGroupScopeNote() {
-  const n = $('groupScope');
-  if (!n) return;
   const list = (overviewData && overviewData.accounts) || [];
-  const cnt = list.filter(groupInScope).length;
+  const scopeCnt = list.filter(groupInScope).length;
   const label = groupScope === '__all__' ? '全部' : (groupScope === '__ungrouped__' ? '未分组' : groupScope);
-  n.textContent = '作用域「' + label + '」· ' + cnt + ' 个账号';
+  if ($('groupScope')) $('groupScope').textContent = '作用域「' + label + '」· ' + scopeCnt + ' 个账号';
+  if ($('batchMode')) {
+    $('batchMode').textContent = selUids.size
+      ? '批量目标：已勾选 ' + selUids.size + ' 个账号'
+      : '批量目标：作用域「' + label + '」· ' + scopeCnt + ' 个账号';
+  }
+  if ($('btnGSelClear')) $('btnGSelClear').disabled = selUids.size === 0;
 }
 
-/* 批量操作统一入口：把当前作用域解析成后端 group 参数并调用批量端点。 */
-async function groupBatch(action, extraBody) {
-  const g = groupScope === '__all__' ? '__all__' : (groupScope === '__ungrouped__' ? '__ungrouped__' : groupScope);
-  return api('groups/' + encodeURIComponent(g) + '/' + encodeURIComponent(action), {
+/* 确认框里用的目标描述。 */
+function batchTargetLabel() {
+  if (selUids.size) return '已勾选的 ' + selUids.size + ' 个账号';
+  return groupScope === '__all__' ? '全部账号'
+    : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
+}
+
+/* 批量操作统一入口：有勾选 → uid 列表（accounts/batch）；无勾选 → 分组作用域。
+   两条路径在后端共用同一个执行器，语义完全一致。 */
+async function runBatch(action, extraBody) {
+  if (selUids.size) {
+    const body = Object.assign({ action: action, uids: [...selUids] }, extraBody || {});
+    return api('accounts/batch', { method: 'POST', body: JSON.stringify(body) });
+  }
+  return api('groups/' + encodeURIComponent(groupScope) + '/' + encodeURIComponent(action), {
     method: 'POST',
     body: JSON.stringify(extraBody || {})
   });
 }
 
+const BATCH_LABEL = {
+  pause: '暂停选号', resume: '恢复选号', disable: '禁用', revive: '恢复',
+  threshold: '设阈值', priority: '设优先', group: '移组', remove: '移除'
+};
+
+/* 批量结果上屏：汇总 toast + 逐条非 done 明细（最多 12 条，复用导入结果那块样式）。
+   「命中」与「变更」分开报——批量里很多账号本来就已是目标状态（幂等 no-op），
+   只报命中数会让人误以为真的动了那么多。 */
+function showBatchResult(action, r) {
+  const affected = r.affected == null ? 0 : r.affected;
+  const changed = r.changed == null ? affected : r.changed;
+  const skipped = r.skipped || 0;
+  // 需要用户看的逐条项：跳过（锁占用 / 账号不存在）与出错。
+  const notes = (r.results || []).filter(it => it.status !== 'done');
+  let msg;
+  if (action === 'remove') {
+    msg = '已移除 ' + (r.removed || affected) + ' 个账号';
+    if (r.file_errors && r.file_errors.length) {
+      msg += '（' + r.file_errors.length + ' 个凭证文件删除失败）';
+    }
+  } else {
+    msg = (BATCH_LABEL[action] || action) + '：变更 ' + changed + ' 个';
+    if (affected !== changed) msg += '（命中 ' + affected + '，其余已是目标状态）';
+  }
+  if (skipped) msg += '，跳过 ' + skipped + ' 个';
+  toast(msg, notes.length && changed === 0 ? 'err' : 'ok');
+  const box = $('batchNotes');
+  if (!box) return;
+  if (!notes.length) { box.hidden = true; box.textContent = ''; return; }
+  const cap = 12;
+  const lines = notes.slice(0, cap).map(it =>
+    '! ' + ((it.uid || '').slice(0, 12)) + '：' + (it.message || it.status));
+  if (notes.length > cap) lines.push('…还有 ' + (notes.length - cap) + ' 条');
+  box.hidden = false;
+  box.textContent = lines.join('\n');
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
+  // 勾选集合随池子收敛：账号已被移除的直接剔除，避免「幽灵选中」被带进批量请求。
+  const alive = new Set(list.map(s => s.uid));
+  for (const u of [...selUids]) { if (!alive.has(u)) selUids.delete(u); }
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    updateGroupScopeNote();
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -429,7 +490,8 @@ function renderAccounts(list) {
   // 分组筛选：先按当前作用域过滤，再渲染（渲染与统计条互不影响）。
   const visible = list.filter(groupInScope);
   if (!visible.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty">当前分组下没有账号。可切换上方「分组」筛选，或给账号分配分组。</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty">当前分组下没有账号。可切换上方「分组」筛选，或给账号分配分组。</div></td></tr>';
+    updateGroupScopeNote();
     return;
   }
   tb.innerHTML = visible.map(s => {
@@ -487,6 +549,8 @@ function renderAccounts(list) {
     const rate = formatRate(tu.last_tokens_per_second);
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
+      '<td class="c-sel"><input type="checkbox" class="rowsel" data-u="' + esc(s.uid) + '"' +
+        (selUids.has(s.uid) ? ' checked' : '') + ' title="勾选后可对选中的账号批量操作"></td>' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (groupOf(s) ? ' <span class="realm-tag" title="所属分组">' + esc(groupOf(s)) + '</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
@@ -521,6 +585,11 @@ function renderAccounts(list) {
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
+  // 全选框跟随当前可见集合（只有全部勾上才显示选中，符合原生 checkbox 语义）。
+  if ($('selAll')) {
+    $('selAll').checked = visible.length > 0 && visible.every(s => selUids.has(s.uid));
+  }
+  updateGroupScopeNote();
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -686,81 +755,107 @@ $('groupFilter').onchange = () => {
   renderAccounts((overviewData && overviewData.accounts) || []);
 };
 
-$('btnGroupEdit').onclick = async () => {
-  // 选中的第一行账号作为编辑对象（若作用域内只有一行则唯一；否则提示用行内按钮）。
-  const list = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
-  if (!list.length) { toast('当前作用域下没有账号', 'err'); return; }
-  const row = list[0];
-  const current = row.group || '';
-  const input = prompt('设置分组名（留空 = 移出分组/未分组）\n账号：' + (row.nickname || row.uid), current);
-  if (input === null) return;
-  await api('accounts/' + encodeURIComponent(row.uid) + '/group', {
-    method: 'POST',
-    body: JSON.stringify({ group: input.trim() })
-  });
-  toast(input.trim() ? '已加入分组「' + input.trim() + '」' : '已移出分组', 'ok');
-  loadOverview(true);
+/* ── 表格多选 ──────────────────────────────────────────────────────── */
+$('btnGSelClear').onclick = () => {
+  selUids.clear();
+  renderAccounts((overviewData && overviewData.accounts) || []);
 };
 
-$('btnGPriority').onclick = async () => {
-  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
-  const input = prompt('对「' + label + '」批量设置「优先」？\n输入 1 = 设为优先，0 = 取消优先', '1');
-  if (input === null) return;
-  const on = input.trim() !== '0';
+// 全选：只作用于「当前筛选后可见」的行，不影响其它分组的勾选。
+$('selAll').onchange = () => {
+  const visible = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
+  if ($('selAll').checked) visible.forEach(s => selUids.add(s.uid));
+  else visible.forEach(s => selUids.delete(s.uid));
+  renderAccounts((overviewData && overviewData.accounts) || []);
+};
+
+// 行内勾选：只更新集合与提示，不重渲染整表（避免滚动位置与焦点跳动）。
+$('accBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input.rowsel');
+  if (!cb) return;
+  if (cb.checked) selUids.add(cb.dataset.u);
+  else selUids.delete(cb.dataset.u);
+  const visible = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
+  if ($('selAll')) {
+    $('selAll').checked = visible.length > 0 && visible.every(s => selUids.has(s.uid));
+  }
+  updateGroupScopeNote();
+});
+
+/* ── 批量动作（有勾选 → 只作用于勾选；无勾选 → 作用于分组作用域）──────── */
+async function batchUI(action) {
   try {
-    const r = await groupBatch('priority', { value: on ? 1 : 0 });
-    toast((on ? '已设优先 ' : '已取消优先 ') + r.affected + ' 个账号', 'ok');
+    const r = await runBatch(action);
+    showBatchResult(action, r);
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
+}
+
+$('btnGPause').onclick = () => batchUI('pause');
+$('btnGResume').onclick = () => batchUI('resume');
+
+$('btnGDisable').onclick = () => {
+  const label = batchTargetLabel();
+  if (!confirm('对' + label + '执行「禁用」？\n\n禁用后不再参与选号，且签到/活跃/保活等保号任务默认跳过，' +
+    '必须手动点「恢复」才回来。只是想让某个号临时让位、但仍要保号，请改用「暂停选号」。')) return;
+  batchUI('disable');
+};
+
+$('btnGRevive').onclick = () => {
+  const label = batchTargetLabel();
+  if (!confirm('对' + label + '执行「恢复」？\n\n将清除禁用、暂停选号、冷却、熔断、连败降权与低积分冻结，' +
+    '账号重新参与选号。')) return;
+  batchUI('revive');
 };
 
 $('btnGThreshold').onclick = async () => {
-  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
-  const input = prompt('对「' + label + '」批量设置低积分冻结阈值（0 = 关闭）', '0');
+  const input = prompt('对' + batchTargetLabel() +
+    '批量设置低积分冻结阈值（0 = 关闭）\n\n余额跌破阈值自动冻结，回到阈值以上自动解冻。', '0');
   if (input === null) return;
   const th = parseInt(input, 10);
   if (isNaN(th) || th < 0) { toast('请输入有效的非负整数', 'err'); return; }
   try {
-    const r = await groupBatch('threshold', { value: th });
-    toast('已对 ' + r.affected + ' 个账号设置阈值 ' + th, 'ok');
+    showBatchResult('threshold', await runBatch('threshold', { value: th }));
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
 };
 
-$('btnGFreeze').onclick = async () => {
-  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
-  if (!confirm('对「' + label + '」批量冻结（禁用）？\n冻结后这些账号不再参与选号，需手动解冻才能恢复。')) return;
+$('btnGPriority').onclick = async () => {
+  const input = prompt('对' + batchTargetLabel() +
+    '批量设置「优先」？\n\n输入 1 = 设为优先（优先消耗该号积分），0 = 取消优先', '1');
+  if (input === null) return;
+  const on = input.trim() !== '0';
   try {
-    const r = await groupBatch('freeze');
-    toast('已冻结 ' + r.affected + ' 个账号', 'ok');
+    showBatchResult('priority', await runBatch('priority', { value: on ? 1 : 0 }));
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
 };
 
-$('btnGRevive').onclick = async () => {
-  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
-  if (!confirm('对「' + label + '」批量解冻？\n将清除这些账号的禁用、冷却、熔断与低积分冻结状态。')) return;
+$('btnGMove').onclick = async () => {
+  const input = prompt('把' + batchTargetLabel() + '移动到哪个分组？\n\n留空 = 移出分组（未分组）', '');
+  if (input === null) return;
+  const g = input.trim();
+  if (g === '__all__' || g === '__ungrouped__') {
+    toast('这两个名字是保留字（批量作用域哨兵），请换一个', 'err');
+    return;
+  }
   try {
-    const r = await groupBatch('revive');
-    toast('已解冻 ' + r.affected + ' 个账号', 'ok');
+    showBatchResult('group', await runBatch('group', { group: g }));
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
 };
 
 $('btnGRemove').onclick = async () => {
-  const label = groupScope === '__all__' ? '全部账号' : (groupScope === '__ungrouped__' ? '未分组账号' : '分组「' + groupScope + '」');
-  // 不可逆保护：必须逐字输入组名（或 __all__），防止误点。
-  const want = groupScope;
-  const input = prompt('⚠️ 不可逆操作：将移除「' + label + '」下全部账号并删除其凭证文件（auths/*.json），恢复需重新登录。\n\n请逐字输入「' + want + '」确认：', '');
+  const label = batchTargetLabel();
+  // 不可逆保护：勾选模式要求逐字输入 REMOVE；作用域模式沿用「输入组名」。
+  const want = selUids.size > 0 ? 'REMOVE' : groupScope;
+  const input = prompt('⚠️ 不可逆操作：将移除' + label +
+    '，并删除其凭证文件（auths/*.json），恢复需重新登录。\n\n请逐字输入「' + want + '」确认：', '');
   if (input === null) return;
-  if (input !== want) {
-    toast('输入与「' + want + '」不一致，已取消（防误删）', 'err');
-    return;
-  }
+  if (input !== want) { toast('输入与「' + want + '」不一致，已取消（防误删）', 'err'); return; }
   try {
-    const r = await groupBatch('remove', { confirm: want });
-    const fe = r.file_errors && r.file_errors.length ? '（' + r.file_errors.length + ' 个凭证文件删除失败）' : '';
-    toast('已移除 ' + (r.removed || r.affected || 0) + ' 个账号' + fe, 'ok');
+    showBatchResult('remove', await runBatch('remove', { confirm: want }));
+    selUids.clear();
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
 };

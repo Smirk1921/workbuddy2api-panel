@@ -225,7 +225,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 /* 模型表无色条（健康指示只属于账号表）。 */
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
-.acc .c-acts { width: 1px; white-space: nowrap; }
+  .acc .c-acts { width: 1px; white-space: nowrap; }
+  /* 批量多选列：窄、居中、不参与表格压缩 */
+  .acc .c-sel { width: 1px; padding: 0 8px; }
+  .acc .c-sel input { cursor: pointer; margin: 0; vertical-align: middle; }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -715,23 +718,32 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
         </header>
-        <!-- 分组筛选 + 批量操作条：筛选下拉挂在账号盒（复用 .fbar 筛选条样式），
-             批量操作作用于当前选中的作用域（全部 / 未分组 / 某一分组）。 -->
+        <!-- 分组筛选 + 批量操作：勾选表格行 = 只作用于选中；未勾选 = 作用于分组作用域。
+             两行布局：第一行选作用域，第二行是动作（动作随作用域/勾选切换目标）。 -->
         <div class="fbar" id="groupBar">
           <span class="flab">分组</span>
           <select id="groupFilter" aria-label="按分组筛选"></select>
-          <button class="xs" id="btnGroupEdit" title="编辑当前行的分组（选账号行操作）">编辑分组</button>
           <span class="grow"></span>
           <span class="flab" id="groupScope"></span>
-          <button class="xs" id="btnGPriority" title="对作用域内账号批量设优先/取消优先">优先</button>
-          <button class="xs" id="btnGThreshold" title="对作用域内账号批量设低积分冻结阈值">阈值</button>
-          <button class="xs" id="btnGFreeze" title="对作用域内账号批量冻结（禁用）">冻结</button>
-          <button class="xs" id="btnGRevive" title="对作用域内账号批量解冻">解冻</button>
-          <button class="xs danger" id="btnGRemove" title="不可逆：移除作用域内全部账号并删除凭证文件（需输入组名确认）">移除</button>
+          <button class="xs" id="btnGSelClear" title="清除表格里勾选的账号">清除选择</button>
         </div>
+        <div class="fbar" id="batchBar">
+          <span class="flab" id="batchMode"></span>
+          <span class="grow"></span>
+          <button class="xs" id="btnGPause" title="暂停选号：退出选号候选，但照常签到/活跃/保活/刷新余额">暂停选号</button>
+          <button class="xs" id="btnGResume" title="恢复选号：只解除「暂停选号」，不影响禁用/冷却">恢复选号</button>
+          <button class="xs danger" id="btnGDisable" title="禁用：退出选号，且保号任务默认跳过；需手动「恢复」才回来。只想临时让位请用「暂停选号」">禁用</button>
+          <button class="xs" id="btnGRevive" title="恢复：清除禁用/暂停/冷却/熔断/连败降权/低积分冻结，账号重新参与选号">恢复</button>
+          <button class="xs" id="btnGThreshold" title="低积分冻结阈值（0 = 关闭）：余额跌破阈值自动冻结，回到阈值以上自动解冻">阈值</button>
+          <button class="xs" id="btnGPriority" title="优先消耗该账号的积分">优先</button>
+          <button class="xs" id="btnGMove" title="移动到另一个分组（留空 = 移出分组/未分组）">移组</button>
+          <button class="xs danger" id="btnGRemove" title="不可逆：移除账号并删除凭证文件（需逐字确认）">移除</button>
+        </div>
+        <div id="batchNotes" class="imp-notes" style="margin:0 17px 10px" hidden></div>
         <div class="tbl-wrap">
         <table class="acc">
           <thead><tr>
+            <th class="c-sel"><input type="checkbox" id="selAll" title="全选当前列表（仅作用于筛选后的可见行）"></th>
             <th class="mark" aria-hidden="true"></th>
             <th>账号</th><th>状态</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>

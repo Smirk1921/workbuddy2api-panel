@@ -183,8 +183,20 @@ func (p *Pool) SetPriority(uid string, on bool) {
 	p.dirty.Store(true)
 }
 
-// maxGroupLen 分组名的最大字节长度（防误粘长文本；与面板的输入校验同口径）。
-const maxGroupLen = 64
+// 批量作用域哨兵：`/panel/api/groups/{scope}/{action}` 用这两个字面量表示「全部」与
+// 「未分组」。SetGroup 拒绝把它们当真实组名——否则该组永远无法被批量接口寻址
+// （接口会把它当哨兵处理，而不是「这个组」）。
+const (
+	GroupScopeAll       = "__all__"
+	GroupScopeUngrouped = "__ungrouped__"
+)
+
+// maxGroupRunes 分组名的最大**字符**长度（防误粘长文本）。
+//
+// 早期按字节截断（64 字节）会把多字节 UTF-8 汉字切成半个字符——落盘后是非法 UTF-8，
+// 面板显示成问号，且该组从此无法用原名匹配。改成按 rune 截断：ASCII 组名行为不变
+// （64 == 64 字节），中文组名不再被截坏。
+const maxGroupRunes = 64
 
 // SetGroup 设置账号的分组名（管理面板入口；空串 = 移出分组/未分组）。
 //
@@ -192,11 +204,17 @@ const maxGroupLen = 64
 // 使用，不影响选号/冻结/禁用/优先等任何池内行为。组名做首尾空白归一化并限长；
 // 空串清除分组（幂等：已是空串时不置脏，避免无意义的落盘）。
 // 组名本身持久化（stateAccount.Group），重启后继续生效。
+//
+// 保留字（GroupScopeAll / GroupScopeUngrouped）与超长一律静默忽略（本方法没有错误
+// 返回值）：面板侧在调用前校验并给出 400，本方法只做兜底。
 // uid 不存在为空操作（与 SetCredits 同口径）；本方法内部自持 p.mu，调用方不得持锁。
 func (p *Pool) SetGroup(uid string, group string) {
 	group = strings.TrimSpace(group)
-	if len(group) > maxGroupLen {
-		group = group[:maxGroupLen]
+	if group == GroupScopeAll || group == GroupScopeUngrouped {
+		return // 保留字：批量接口的作用域哨兵，不能当组名
+	}
+	if r := []rune(group); len(r) > maxGroupRunes {
+		group = string(r[:maxGroupRunes])
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -33,11 +34,27 @@ func TestSetGroupSetClearAndNormalize(t *testing.T) {
 		t.Fatalf("TrimSpace 后应为「主力」，实得 %q", g)
 	}
 
-	// 超长截断（> maxGroupLen 字节）。
-	long := strings.Repeat("组", maxGroupLen+10)
+	// 超长截断（> maxGroupRunes 字符）：按 rune 截断，**不得切断多字节字符**
+	// ——早期按字节截断会把汉字切成半个，落盘后是非法 UTF-8。
+	long := strings.Repeat("组", maxGroupRunes+10)
 	p.SetGroup("u1", long)
-	if g := p.groupDomain("u1"); len(g) > maxGroupLen {
-		t.Fatalf("超长应截断到 %d 字节，实得 %d", maxGroupLen, len(g))
+	g := p.groupDomain("u1")
+	if n := len([]rune(g)); n > maxGroupRunes {
+		t.Fatalf("超长应截断到 %d 字符，实得 %d", maxGroupRunes, n)
+	}
+	if !utf8.ValidString(g) {
+		t.Fatalf("截断后必须是合法 UTF-8，实得 %q", g)
+	}
+
+	// 保留字（批量作用域哨兵）不能当组名，否则该组永远无法被寻址。
+	p.SetGroup("u1", "")
+	p.SetGroup("u1", GroupScopeAll)
+	if g := p.groupDomain("u1"); g != "" {
+		t.Fatalf("保留字 %q 应被忽略（组名保持空），实得 %q", GroupScopeAll, g)
+	}
+	p.SetGroup("u1", GroupScopeUngrouped)
+	if g := p.groupDomain("u1"); g != "" {
+		t.Fatalf("保留字 %q 应被忽略（组名保持空），实得 %q", GroupScopeUngrouped, g)
 	}
 
 	// 空串 = 移出分组（幂等：已是空串时不报错）。

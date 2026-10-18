@@ -638,6 +638,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="sub" id="navSub">控制台</div>
     </div>
     <ul>
+      <li><a href="#dashboard" data-view="dashboard">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><rect x="2.8" y="8.2" width="2.6" height="5.3" rx=".6"/><rect x="6.7" y="4.4" width="2.6" height="9.1" rx=".6"/><rect x="10.6" y="6.6" width="2.6" height="6.9" rx=".6"/></svg>
+        仪表盘</a></li>
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
@@ -680,6 +683,70 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </div>
 
     <!-- 账号池 -->
+    <!-- 仪表盘：池子健康度 + 可用积分（可选口径）+ 到期压力 + 分组概览 + 积分榜 + 模型锁。
+         数据全部来自 /panel/api/dashboard（服务端聚合，零上游请求）。 -->
+    <section class="view" id="view-dashboard" hidden>
+      <div class="box">
+        <header>
+          <h3>总览</h3>
+          <span class="grow"></span>
+          <span class="note" id="dashNote">—</span>
+          <span class="trange" id="dashRange"></span>
+          <button class="xs" id="btnDash">刷新</button>
+        </header>
+        <div class="kpis" id="dashKpis"></div>
+        <div class="pad" style="padding-top:0">
+          <label class="sel-note" title="勾上后只统计此刻真正可服务的账号（排除 禁用 / 低积分冻结 / 暂停选号 / 冷却中）">
+            <input type="checkbox" id="dashExclude" style="margin-right:6px">积分只算可服务账号（排除 禁用 / 低积分冻结 / 暂停选号 / 冷却中）
+          </label>
+        </div>
+        <div class="pad" style="padding-top:0">
+          <div class="uschart">
+            <div class="uschart-hd">
+              <span class="lb">Token 时序</span>
+              <span class="note" id="dashChartNote">—</span>
+              <span class="grow"></span>
+              <span class="legend">
+                <i class="sw sw-p"></i>prompt<i class="sw sw-c"></i>completion
+                <span class="sep"></span><i class="sw sw-t"></i>均值
+              </span>
+            </div>
+            <div id="dashChart" class="uschart-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>分组概览</h3><span class="grow"></span><span class="note" id="dashGroupNote">—</span></header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr><th>分组</th><th>账号</th><th>可用</th><th>暂停</th><th>低积分冻结</th><th>禁用</th><th>冷却</th><th>积分剩余 / 总额</th></tr></thead>
+            <tbody id="dashGroups"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>积分榜</h3><span class="grow"></span><span class="note" id="dashTopNote">—</span></header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr><th>账号</th><th>分组</th><th>域</th><th>积分剩余 / 总额</th><th>快过期积分</th></tr></thead>
+            <tbody id="dashTop"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>模型锁池 <span class="hint">哪些模型不能用、还要锁多久</span></h3><span class="grow"></span><span class="note" id="dashMlNote"></span></header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr><th>模型</th><th>域</th><th>状态</th><th>可选 / 总数</th><th>锁定账号</th><th>最早解锁</th><th>全池解锁</th><th>原因</th></tr></thead>
+            <tbody id="dashMlBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-accounts">
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>

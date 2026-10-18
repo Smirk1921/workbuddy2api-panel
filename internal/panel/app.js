@@ -338,12 +338,13 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { dashboard: '仪表盘', accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
+  if (v === 'dashboard') loadDashboard();
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
@@ -594,10 +595,10 @@ function renderAccounts(list) {
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
-function renderModelLocks(rows) {
-  const tb = $('mlBody');
+function renderModelLocks(rows, bodyId, noteId) {
+  const tb = $(bodyId || 'mlBody');
   if (!tb) return;
-  const note = $('mlNote');
+  const note = $(noteId || 'mlNote');
   if (!rows || !rows.length) {
     tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>';
     if (note) note.textContent = '';
@@ -640,9 +641,9 @@ async function loadOverview(quiet) {
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
-    const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
-  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
-  $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
+    // 积分卡片与仪表盘共用同一口径开关（见 creditTotalsFor）：
+    // 旧实现无条件累加全部账号，且把企业版 credits_total=-1 也加了进去（总额少 1）。
+    renderCreditStat();
     $('sSticky').textContent = d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
@@ -1542,8 +1543,121 @@ $('btnRefresh').onclick = async () => {
 };
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
+/* ── 仪表盘 ──────────────────────────────────────────────────────────
+   数据全部来自 /panel/api/dashboard（服务端由内存状态 + 本地用量记录器聚合，
+   零上游请求）。图表与模型锁表直接复用用量页/账号池的渲染函数（已参数化宿主 id）。 */
+let dashData = null;
+
+// 积分口径开关：true = 只算「可服务」账号（排除 禁用 / 低积分冻结 / 暂停选号 / 冷却中）；
+// false = 排除「低积分冻结 / 暂停选号」（默认，就是用户要求的那个口径）。
+// 与账号池那张 #sCredits 共用同一开关（localStorage 持久化），两端数字始终一致。
+const LS_DASH_STRICT = 'wb2api.creditsStrict';
+let creditsStrict = false;
+try { creditsStrict = localStorage.getItem(LS_DASH_STRICT) === '1'; } catch (e) { creditsStrict = false; }
+
+// creditTotalsFor 按当前开关口径汇总账号池积分（账号池卡片用）。
+// 企业版 credits_total = -1（不限量）不计入总额——旧实现直接累加会让总额少 1。
+function creditTotalsFor(list) {
+  let remain = 0, total = 0;
+  for (const s of (list || [])) {
+    if (creditsStrict && (s.disabled || s.paused || s.frozen || s.cooling)) continue;
+    remain += (s.credits || 0);
+    if (s.credits_total > 0) total += s.credits_total;
+  }
+  return { remain: remain, total: total };
+}
+
+function renderCreditStat() {
+  const el = $('sCredits');
+  if (!el) return;
+  const t = creditTotalsFor((overviewData && overviewData.accounts) || []);
+  el.textContent = t.total > 0 ? t.remain + ' / ' + t.total : String(t.remain);
+}
+
+async function loadDashboard() {
+  const note = $('dashNote');
+  if (note) note.textContent = '加载中…';
+  try {
+    const q = trangeQuery('dashRange', true);
+    const d = await api('dashboard?' + q.toString());
+    dashData = d;
+    renderDashboard(d);
+    if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    if (note) note.textContent = '读取失败：' + e.message;
+  }
+}
+
+function renderDashboard(d) {
+  const c = d.counts || {};
+  const cr = d.credits || {};
+  const strict = creditsStrict ? (cr.servable_only || {}) : (cr.exclude_frozen_paused || {});
+  const all = cr.all || {};
+  const realm = d.realm || {};
+  const cn = realm.cn || {}, gl = realm.global || {};
+  const exp = d.expiry || {};
+  $('dashKpis').innerHTML = [
+    usKpi(strict.total > 0 ? strict.remain + ' / ' + strict.total : String(strict.remain || 0),
+      creditsStrict ? '可用积分（仅可服务）' : '可用积分（排除冻结/暂停）', 'c-accent',
+      '全部 ' + (all.remain || 0) + (all.total > 0 ? ' / ' + all.total : '') +
+      (all.unlimited_accounts ? ' · 不限量 ' + all.unlimited_accounts + ' 个' : '')),
+    usKpi(String(c.total || 0), '账号总数', 'c-mute', '在途占满 ' + (c.in_flight_full || 0)),
+    usKpi(String(c.healthy || 0), '可用', 'c-ok', '当前可服务'),
+    usKpi(String(c.cooling || 0), '冷却中', c.cooling ? 'c-warn' : 'c-mute', '限流 / 熔断 / 降权'),
+    usKpi(String(c.frozen || 0), '低积分冻结', c.frozen ? 'c-warn' : 'c-mute', '余额恢复自动解冻'),
+    usKpi(String(c.paused || 0), '暂停选号', c.paused ? 'c-warn' : 'c-mute', '照常签到保活'),
+    usKpi(String(c.disabled || 0), '已禁用', c.disabled ? 'c-bad' : 'c-mute', '需手动恢复'),
+    usKpi(String((cn.credits && cn.credits.remain) || 0), 'CN 域积分', 'c-soft',
+      ((cn.counts && cn.counts.total) || 0) + ' 个账号'),
+    usKpi(String((gl.credits && gl.credits.remain) || 0), 'Global 域积分', 'c-soft',
+      ((gl.counts && gl.counts.total) || 0) + ' 个账号'),
+    usKpi(String(exp.d30 || 0), '30 天内到期', exp.d30 ? 'c-warn' : 'c-mute',
+      exp.earliest_date ? '最早 ' + exp.earliest_date + '（剩 ' + (exp.earliest_remaining || 0) + '）' : '暂无到期批次')
+  ].join('');
+
+  const gs = d.groups || [];
+  $('dashGroups').innerHTML = gs.length ? gs.map(g =>
+    '<tr><td>' + (g.group ? esc(g.group) : '<span style="color:var(--ink-3)">未分组</span>') + '</td>' +
+    '<td class="num">' + g.accounts + '</td>' +
+    '<td class="num">' + g.healthy + '</td>' +
+    '<td class="num">' + (g.paused || 0) + '</td>' +
+    '<td class="num">' + (g.frozen || 0) + '</td>' +
+    '<td class="num">' + (g.disabled || 0) + '</td>' +
+    '<td class="num">' + (g.cooling || 0) + '</td>' +
+    '<td class="num">' + g.credits_remain + (g.credits_total > 0 ? ' / ' + g.credits_total : '') + '</td></tr>'
+  ).join('') : '<tr><td colspan="8"><div class="empty">暂无账号</div></td></tr>';
+  $('dashGroupNote').textContent = gs.length + ' 个分组';
+
+  const top = d.top_accounts || [];
+  $('dashTop').innerHTML = top.length ? top.map(a =>
+    '<tr><td>' + (a.nickname ? esc(a.nickname) : '<span style="color:var(--ink-3)">未命名</span>') +
+      '<div style="font-size:11px;color:var(--ink-3)">' + esc((a.uid || '').slice(0, 12)) + '</div></td>' +
+    '<td>' + (a.group ? esc(a.group) : '—') + '</td>' +
+    '<td>' + (a.realm === 'global' ? '国际版' : '国内版') + '</td>' +
+    '<td class="num">' + a.credits + (a.credits_total > 0 ? ' / ' + a.credits_total : '') + '</td>' +
+    '<td class="num">' + (a.credits_expiring || 0) + '</td></tr>'
+  ).join('') : '<tr><td colspan="5"><div class="empty">暂无账号</div></td></tr>';
+  $('dashTopNote').textContent = '积分最多的 ' + top.length + ' 个账号';
+
+  renderModelLocks(d.model_locks, 'dashMlBody', 'dashMlNote');
+  renderUsageChart((d.usage && d.usage.series) || [], 'dashChart', 'dashChartNote');
+}
+
+if ($('dashRange')) trangeBind('dashRange', loadDashboard);
+if ($('btnDash')) $('btnDash').onclick = () => loadDashboard();
+if ($('dashExclude')) {
+  $('dashExclude').checked = creditsStrict;
+  $('dashExclude').onchange = () => {
+    creditsStrict = $('dashExclude').checked;
+    try { localStorage.setItem(LS_DASH_STRICT, creditsStrict ? '1' : '0'); } catch (e) { /* 隐私模式忽略 */ }
+    renderCreditStat();
+    if (dashData) renderDashboard(dashData);
+  };
+}
+
 function refreshVisible() {
-  if (view === 'accounts') loadOverview(true);
+  if (view === 'dashboard') loadDashboard();
+  else if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
@@ -2445,8 +2559,9 @@ function fmtTokTimeLabel(p) {
     : String(d.getHours()).padStart(2, '0') + ':00';
 }
 
-function renderUsageChart(series) {
-  const host = $('usChart');
+function renderUsageChart(series, hostId, noteId) {
+  const host = $(hostId || 'usChart');
+  const noteEl = $(noteId || 'usChartNote');
 
   // 丢掉时间解析不出来的点，而不是让 NaN 传染整张图。
   const pts = [];
@@ -2460,7 +2575,7 @@ function renderUsageChart(series) {
   }
   if (!pts.length) {
     host.innerHTML = '<div class="us-empty">暂无用量数据。发起一次对话后再刷新。</div>';
-    $('usChartNote').textContent = '—';
+    noteEl.textContent = '—';
     return;
   }
 
@@ -2474,7 +2589,7 @@ function renderUsageChart(series) {
   const max = Math.max(1, ...pts.map(p => p.tt));
   const peak = pts.reduce((a, b) => (b.tt > a.tt ? b : a), pts[0]);
   const avg = pts.reduce((s, p) => s + p.tt, 0) / pts.length;
-  $('usChartNote').textContent =
+  noteEl.textContent =
     pts.length + ' 个点 · 峰值 ' + fmtTok(peak.tt) + ' @ ' + fmtTokTimeLabel(peak) +
     ' · 均值 ' + fmtTok(avg);
 

@@ -169,6 +169,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountSetPriority))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.withAuth(p.accountSetGroup))
 	p.mux.HandleFunc("GET /panel/api/groups", p.withAuth(p.groupsList))
+	// 仪表盘聚合：计数 / 三档积分口径 / 分域 / 分组 / 到期压力 / 用量时序（零上游请求）。
+	p.mux.HandleFunc("GET /panel/api/dashboard", p.withAuth(p.dashboard))
 	p.mux.HandleFunc("POST /panel/api/groups/{group}/{action}", p.withAuth(p.groupAction))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))

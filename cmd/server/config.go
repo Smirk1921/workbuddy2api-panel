@@ -120,6 +120,19 @@ type Config struct {
 		// 4000 以下的号正是没人补领的那批）。需要「完全不动上游」的部署显式置 false。
 		TaskSweepEnabled bool `json:"task_sweep_enabled"` // 缺省 true；false = 关闭
 		TaskSweepMinutes int  `json:"task_sweep_minutes"` // 缺省 15；<=0 回落 15
+
+		// 任务节奏（自动做任务时的节流间隔）。duration 字符串或纯数字（秒），
+		// 例如 "1050ms" / "2s" / "0.5"。空 = 默认。
+		//
+		//   TaskActionGap  每个动作 / 上报之间（默认 1050ms，对齐上游脚本实测口径，
+		//                  也是 avoid-风控 的主要节流点）；
+		//   TaskAccountGap 每个账号之间（默认 200ms；旅行 / 活跃上报历史上是 800ms，
+		//                  统一由本值控制）。
+		//
+		// 刻意不纳入：小程序对话事件间隔（45s，反作弊硬约束）、领奖轮询预算、
+		// 专家召唤间隔（实测校准）——调小会直接坏功能，不是「节奏」。
+		TaskActionGap  string `json:"task_action_gap"`
+		TaskAccountGap string `json:"task_account_gap"`
 	} `json:"schedule"`
 
 	Global struct {
@@ -238,6 +251,8 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+	TaskActionGapDur       time.Duration `json:"-"` // 动作/上报之间的节流（0 = 不节流）
+	TaskAccountGapDur      time.Duration `json:"-"` // 账号之间的节流（0 = 不节流）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -281,6 +296,8 @@ func Default() *Config {
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
+	c.Schedule.TaskActionGap = "1050ms"
+	c.Schedule.TaskAccountGap = "200ms"
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -615,6 +632,17 @@ func (c *Config) normalize() error {
 		}
 		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
 	}
+	// 任务节奏：两个间隔都做「空/非法 → 回落默认、负数报错、超上限夹断」。
+	actionGap, err := parseTaskGap("schedule.task_action_gap", c.Schedule.TaskActionGap, defaultTaskActionGap)
+	if err != nil {
+		return err
+	}
+	accountGap, err := parseTaskGap("schedule.task_account_gap", c.Schedule.TaskAccountGap, defaultTaskAccountGap)
+	if err != nil {
+		return err
+	}
+	c.TaskActionGapDur = actionGap
+	c.TaskAccountGapDur = accountGap
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
@@ -679,4 +707,40 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		}
 	}
 	return nil
+}
+
+// 任务节奏的默认值与上限（与 config.example.json / 面板表单口径一致）。
+const (
+	defaultTaskActionGap  = 1050 * time.Millisecond
+	defaultTaskAccountGap = 200 * time.Millisecond
+	maxTaskGap            = 5 * time.Minute
+)
+
+// parseTaskGap 解析任务节奏间隔。
+//
+// 接受 duration 字符串（"1050ms" / "2s" / "0.5s"）或纯数字（按秒，如 "2" / "0.35"）。
+// 空串 = 用默认值；解析失败或负数报错（快速失败——别让用户以为改了、实际没生效）；
+// 超过 maxTaskGap 夹到上限，防止手滑写出把队列拖死的大值。
+func parseTaskGap(field, raw string, def time.Duration) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		// 允许纯数字（单位秒）：手改配置时更顺手。
+		if n, nerr := strconv.ParseFloat(raw, 64); nerr == nil {
+			d, err = time.Duration(n*float64(time.Second)), nil
+		}
+	}
+	if err != nil {
+		return 0, fmt.Errorf(`%s: 无法解析 %q（用 duration 字符串如 "1050ms"/"2s"，或纯数字按秒）`, field, raw)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s: 不能为负（%q）", field, raw)
+	}
+	if d > maxTaskGap {
+		d = maxTaskGap
+	}
+	return d, nil
 }

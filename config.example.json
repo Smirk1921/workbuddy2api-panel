@@ -36,6 +36,8 @@
     "balance_refresh_minutes": 5,
     "task_sweep_enabled": true,
     "task_sweep_minutes": 15,
+    "task_action_gap": "1050ms",
+    "task_account_gap": "200ms",
     "include_disabled_in_tasks": false
   },
   "global": {

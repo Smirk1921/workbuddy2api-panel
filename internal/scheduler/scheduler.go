@@ -554,7 +554,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, activityDelay()) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}

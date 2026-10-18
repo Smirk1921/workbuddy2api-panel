@@ -331,7 +331,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
 			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
 			if accepted := p.acceptPendingTasks(one.a); accepted > 0 {
-				time.Sleep(reportGap) // 给上游状态流转留时间
+				time.Sleep(actionGap()) // 给上游状态流转留时间
 			}
 			for i := range q.items {
 				uid, kind, code := q.snapshotAt(i)
@@ -350,7 +350,7 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				} else {
 					p.queueMarkAt(i, "done", msg)
 				}
-				time.Sleep(reportGap) // 项间节流
+				time.Sleep(actionGap()) // 项间节流
 			}
 		}(one)
 	}

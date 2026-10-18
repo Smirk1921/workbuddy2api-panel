@@ -1040,6 +1040,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">定时「接受待接受的任务 + 补领已达标但没人领的奖」。补的是自动执行覆盖不到的两类：你在代理里真实对话点亮的任务，以及历史上漏领的达标任务（积分卡在 2000/2100/2300 上不去 4000 就是这个原因）。全幂等，重复领不重复计数。</span></label>
             </div>
             <div class="hr"></div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">任务动作间隔</span>
+                <input name="task_action_gap" placeholder="1050ms">
+                <span class="hint">自动做任务时每个动作 / 上报之间的节流（如 <b>1050ms</b> / <b>2s</b>；纯数字按秒）。默认 1050ms 是上游脚本实测口径——调小更快但更容易撞风控。</span></label>
+              <label class="fld"><span class="lb">任务账号间隔</span>
+                <input name="task_account_gap" placeholder="200ms">
+                <span class="hint">每个账号之间的间隔（任务清扫 / 旅行 / 活跃上报共用；默认 200ms，旅行与活跃历史上是 800ms，现在统一由本值控制）。</span></label>
+            </div>
+            <div class="hint" style="margin-top:6px">小程序对话事件间隔（45s）、领奖轮询预算、专家召唤间隔是功能硬约束，不在上面两个开关的调节范围内。</div>
+            <div class="hr"></div>
             <div class="switch"><span class="lb">保号任务覆盖已禁用账号</span>
               <input type="checkbox" name="include_disabled_in_tasks"></div>
             <div class="hint">禁用只关选号：打开后已禁用的账号仍会签到 / 活跃上报 / 保活 / 刷新余额（依旧不参与选号）。适合「一次只放开一个账号、用禁用做流量开关」的轮换养号用法，默认关闭。<br>若只想让<b>单个</b>账号临时退出选号但保留保号，直接用账号行的「<b>暂停选号</b>」按钮（账号级，无需打开本开关）。</div>

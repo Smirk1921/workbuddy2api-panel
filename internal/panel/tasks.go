@@ -13,9 +13,6 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
-var acceptBatchGap = 1050 * time.Millisecond
-
 // accountByUID 取账号凭证；不存在时写 404 并返回 nil。
 func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
 	a := p.cfg.Pool.AuthByUID(uid)
@@ -120,7 +117,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		accepted += end - i
-		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
+		time.Sleep(actionGap()) // 批间节流（对齐脚本 1.05s 口径）
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
@@ -137,7 +134,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, mpCodes...)
 			} else {
 				accepted += len(mpCodes)
-				time.Sleep(acceptBatchGap)
+				time.Sleep(actionGap())
 			}
 		}
 	}

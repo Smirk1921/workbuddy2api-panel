@@ -231,6 +231,8 @@ func main() {
 	case cfg.TaskSweepInterval > 0:
 		log.Printf("成长任务清扫：每 %s（accept 待接受 + 补领已达标未领的奖）", cfg.TaskSweepInterval)
 	}
+	log.Printf("任务节奏：动作间隔 %s · 账号间隔 %s（schedule.task_action_gap / task_account_gap）",
+		cfg.TaskActionGapDur, cfg.TaskAccountGapDur)
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -296,6 +298,9 @@ func main() {
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 	// 成长任务清扫（accept 待接受 + 补领已达标未领）：分钟级独立循环，见 StartTaskSweep。
 	sch.SetSweepHook(pn.RunTaskSweepOnce)
+	// 任务节奏：面板侧控制上报/动作节流，调度器侧控制旅行/活跃/领养的账号间限速。
+	panel.SetTaskPacing(cfg.TaskActionGapDur, cfg.TaskAccountGapDur)
+	sch.SetTaskDelays(cfg.TaskActionGapDur, cfg.TaskAccountGapDur)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -514,6 +519,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetSweepInterval(newCfg.TaskSweepInterval)
+	panel.SetTaskPacing(newCfg.TaskActionGapDur, newCfg.TaskAccountGapDur)
+	sch.SetTaskDelays(newCfg.TaskActionGapDur, newCfg.TaskAccountGapDur)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	return restartRequiredFields(newCfg), nil

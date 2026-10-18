@@ -63,7 +63,7 @@ func (s *Scheduler) RunTravelNow() {
 			continue // 企业版门控：无成长体系（/activity/growth/* 上游一律 403），不发起任何上游调用
 		}
 		if !first {
-			time.Sleep(travelAccountDelay)
+			time.Sleep(travelDelay())
 		}
 		first = false
 		s.travelOne(a)
@@ -140,7 +140,7 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
 		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
 	} else {
-		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
+		time.Sleep(adoptDelay()) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {
 		log.Printf("travel %s: agreement: %v", logfmt.Label(a.UID, a.Nickname), err)

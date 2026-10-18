@@ -91,8 +91,8 @@ func (p *Panel) sweepAllAccounts() taskSweepStats {
 			st.Errors++
 			log.Printf("panel: 任务清扫 uid=%s: %v", s.UID, err)
 		}
-		if taskSweepAccountGap > 0 {
-			time.Sleep(taskSweepAccountGap)
+		if g := accountGap(); g > 0 {
+			time.Sleep(g)
 		}
 	}
 	return st
@@ -151,7 +151,7 @@ func (p *Panel) sweepAccount(a *auth.Auth) (accepted, claimed int, credits, ener
 	if accepted > 0 {
 		// 刚 accept 的任务要给上游状态流转留时间再领（reportGap 是既有实测口径）。
 		// 只在真的接受了任务时才等——绝大多数轮次 accepted==0，不拖慢清扫。
-		time.Sleep(reportGap)
+		time.Sleep(actionGap())
 	}
 
 	// 阶段 2：领「进度达标且未领取」的奖。

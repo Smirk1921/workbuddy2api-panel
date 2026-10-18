@@ -55,6 +55,6 @@ func (s *Scheduler) RunBlackcatNow() {
 			continue
 		}
 		log.Printf("blackcat %s: 完成 %d 次夜间对话", logfmt.Label(a.UID, a.Nickname), ok)
-		time.Sleep(activityAccountDelay)
+		time.Sleep(activityDelay())
 	}
 }

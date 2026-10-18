@@ -792,8 +792,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="fbar" id="groupBar">
           <span class="flab">分组</span>
           <select id="groupFilter" aria-label="按分组筛选"></select>
+          <span class="flab">状态</span>
+          <select id="statusFilter" aria-label="按状态筛选">
+            <option value="all">全部状态</option>
+            <option value="11140">11140 风控封禁</option>
+            <option value="healthy">可用</option>
+            <option value="cooling">冷却中</option>
+            <option value="frozen">低积分冻结</option>
+            <option value="paused">暂停选号</option>
+            <option value="disabled">已禁用</option>
+          </select>
           <span class="grow"></span>
           <span class="flab" id="groupScope"></span>
+          <button class="xs" id="btnSel11140" title="筛出被上游 11140 风控封禁的账号并全选（便于一次性禁用 / 移除 / 移组）">选中 11140</button>
           <button class="xs" id="btnGSelClear" title="清除表格里勾选的账号">清除选择</button>
         </div>
         <div class="fbar" id="batchBar">

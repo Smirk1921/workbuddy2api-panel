@@ -377,6 +377,37 @@ let groupScope = '__all__';
    否则一刷新就全丢）。池里已消失的 uid 在渲染时剔除，避免「幽灵选中」。 */
 const selUids = new Set();
 
+/* 状态筛选：all / 11140 / healthy / cooling / frozen / paused / disabled。
+   「11140」是上游「账号存在异常行为」的授权封禁——handler 收到 11140 request illegal
+   后会 Disable 并把 11140 写进 disabled_reason，这里据此筛出来，便于一次性处理。 */
+let statusFilter = 'all';
+
+/* accountClass 与后端 countsDetailedForRealm 同优先级：
+   disabled > paused > frozen > cooling > healthy。 */
+function accountClass(s) {
+  if (s.disabled) return 'disabled';
+  if (s.paused) return 'paused';
+  if (s.frozen) return 'frozen';
+  if (s.cooling || (s.cool_remaining_sec || 0) > 0) return 'cooling';
+  return 'healthy';
+}
+
+function isBanned11140(s) {
+  return !!(s.disabled && (s.disabled_reason || '').indexOf('11140') >= 0);
+}
+
+function statusInScope(s) {
+  if (statusFilter === 'all') return true;
+  if (statusFilter === '11140') return isBanned11140(s);
+  return accountClass(s) === statusFilter;
+}
+
+/* visibleAccounts 当前「分组 + 状态」两个筛选后的可见集合（渲染 / 计数 / 全选共用）。 */
+function visibleAccounts() {
+  const list = (overviewData && overviewData.accounts) || [];
+  return list.filter(groupInScope).filter(statusInScope);
+}
+
 function groupOf(s) { return s.group || ''; }
 function groupInScope(s) {
   if (groupScope === '__all__') return true;
@@ -406,11 +437,18 @@ function renderGroupBar() {
 
 /* 作用域 / 选择提示：上行显示分组维度，批量行显示本次会作用到谁。
    有勾选 → 只作用于勾选集合；无勾选 → 作用于整个分组作用域。 */
+const STATUS_LABEL = {
+  all: '', '11140': '11140 风控', healthy: '可用', cooling: '冷却中',
+  frozen: '低积分冻结', paused: '暂停选号', disabled: '已禁用'
+};
+
 function updateGroupScopeNote() {
-  const list = (overviewData && overviewData.accounts) || [];
-  const scopeCnt = list.filter(groupInScope).length;
+  const scopeCnt = visibleAccounts().length;
   const label = groupScope === '__all__' ? '全部' : (groupScope === '__ungrouped__' ? '未分组' : groupScope);
-  if ($('groupScope')) $('groupScope').textContent = '作用域「' + label + '」· ' + scopeCnt + ' 个账号';
+  const st = STATUS_LABEL[statusFilter] || '';
+  if ($('groupScope')) {
+    $('groupScope').textContent = '作用域「' + label + '」' + (st ? ' · 状态 ' + st : '') + ' · ' + scopeCnt + ' 个账号';
+  }
   if ($('batchMode')) {
     $('batchMode').textContent = selUids.size
       ? '批量目标：已勾选 ' + selUids.size + ' 个账号'
@@ -478,7 +516,9 @@ function showBatchResult(action, r) {
 
 function renderAccounts(list) {
   const tb = $('accBody');
-  // 勾选集合随池子收敛：账号已被移除的直接剔除，避免「幽灵选中」被带进批量请求。
+  // 勾选集合随**视图**收敛：只保留「当前可见且仍在池里」的账号。
+  // 切分组筛选 / 切状态筛选 / 批量移组把账号移出当前视图后，都不会再有幽灵选中被
+  // 带进下一次批量（实测踩过：移组后旧勾选仍留着，后续操作连带命中前面的账号）。
   const alive = new Set(list.map(s => s.uid));
   for (const u of [...selUids]) { if (!alive.has(u)) selUids.delete(u); }
   if (!list.length) {
@@ -489,9 +529,11 @@ function renderAccounts(list) {
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   // 分组筛选：先按当前作用域过滤，再渲染（渲染与统计条互不影响）。
-  const visible = list.filter(groupInScope);
+  const visible = list.filter(groupInScope).filter(statusInScope);
+  const visibleSet = new Set(visible.map(s => s.uid));
+  for (const u of [...selUids]) { if (!visibleSet.has(u)) selUids.delete(u); }
   if (!visible.length) {
-    tb.innerHTML = '<tr><td colspan="10"><div class="empty">当前分组下没有账号。可切换上方「分组」筛选，或给账号分配分组。</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty">当前筛选下没有账号。可切换上方「分组 / 状态」筛选。</div></td></tr>';
     updateGroupScopeNote();
     return;
   }
@@ -756,6 +798,27 @@ $('groupFilter').onchange = () => {
   renderAccounts((overviewData && overviewData.accounts) || []);
 };
 
+$('statusFilter').onchange = () => {
+  statusFilter = $('statusFilter').value;
+  updateGroupScopeNote();
+  renderAccounts((overviewData && overviewData.accounts) || []);
+};
+
+/* 「选中 11140」：把状态筛选切到 11140 并全选命中账号——一次性禁用/移除/移组，
+   不用在一长串账号里手工找。点「清除选择」或把状态切回「全部状态」即可退出。 */
+$('btnSel11140').onclick = () => {
+  statusFilter = '11140';
+  if ($('statusFilter')) $('statusFilter').value = '11140';
+  selUids.clear();
+  const list = (overviewData && overviewData.accounts) || [];
+  const hit = list.filter(groupInScope).filter(statusInScope);
+  hit.forEach(s => selUids.add(s.uid));
+  renderAccounts(list);
+  toast(hit.length
+    ? '已筛出并选中 ' + hit.length + ' 个 11140 风控账号'
+    : '没有 11140 风控账号', hit.length ? 'ok' : 'err');
+};
+
 /* ── 表格多选 ──────────────────────────────────────────────────────── */
 $('btnGSelClear').onclick = () => {
   selUids.clear();
@@ -764,7 +827,7 @@ $('btnGSelClear').onclick = () => {
 
 // 全选：只作用于「当前筛选后可见」的行，不影响其它分组的勾选。
 $('selAll').onchange = () => {
-  const visible = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
+  const visible = visibleAccounts();
   if ($('selAll').checked) visible.forEach(s => selUids.add(s.uid));
   else visible.forEach(s => selUids.delete(s.uid));
   renderAccounts((overviewData && overviewData.accounts) || []);
@@ -776,7 +839,7 @@ $('accBody').addEventListener('change', ev => {
   if (!cb) return;
   if (cb.checked) selUids.add(cb.dataset.u);
   else selUids.delete(cb.dataset.u);
-  const visible = ((overviewData && overviewData.accounts) || []).filter(groupInScope);
+  const visible = visibleAccounts();
   if ($('selAll')) {
     $('selAll').checked = visible.length > 0 && visible.every(s => selUids.has(s.uid));
   }
@@ -842,6 +905,9 @@ $('btnGMove').onclick = async () => {
   }
   try {
     showBatchResult('group', await runBatch('group', { group: g }));
+    // 移组会让账号离开当前分组视图：必须清空勾选，否则旧选中留在集合里，
+    // 下次勾别的号再操作会连带命中它们（用户实测反馈的 bug）。
+    selUids.clear();
     loadOverview(true);
   } catch (e) { toast(e.message, 'err'); }
 };

@@ -1598,8 +1598,9 @@ function renderDashboard(d) {
   const exp = d.expiry || {};
   $('dashKpis').innerHTML = [
     usKpi(strict.total > 0 ? strict.remain + ' / ' + strict.total : String(strict.remain || 0),
-      creditsStrict ? '可用积分（仅可服务）' : '可用积分（排除冻结/暂停）', 'c-accent',
-      '全部 ' + (all.remain || 0) + (all.total > 0 ? ' / ' + all.total : '') +
+      '可用积分', 'c-accent kpi-sm',
+      (creditsStrict ? '仅可服务' : '排除冻结/暂停') +
+      ' · 全部 ' + (all.remain || 0) + (all.total > 0 ? ' / ' + all.total : '') +
       (all.unlimited_accounts ? ' · 不限量 ' + all.unlimited_accounts + ' 个' : '')),
     usKpi(String(c.total || 0), '账号总数', 'c-mute', '在途占满 ' + (c.in_flight_full || 0)),
     usKpi(String(c.healthy || 0), '可用', 'c-ok', '当前可服务'),

@@ -444,6 +444,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     overflow: hidden; text-overflow: ellipsis; }
   .kpi .v { font: 600 23px/1.15 var(--mono); font-variant-numeric: tabular-nums;
     letter-spacing: -.02em; margin-top: 5px; white-space: nowrap; }
+  /* 长数值（如「剩余 / 总额」两个数）：23px 在 6 列布局下会被卡片裁掉，降一档字号。 */
+  .kpi.kpi-sm .v { font-size: 17px; letter-spacing: -.01em; }
   .kpi .s { font-size: 11px; color: var(--ink-3); margin-top: 4px; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
   .kpi.c-accent { --kpi-c: var(--accent); } .kpi.c-accent .v { color: var(--accent); }

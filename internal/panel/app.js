@@ -1588,33 +1588,69 @@ $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
+  const files = [...$('importFile').files];
+  if (!files.length) return;
+  const multi = files.length > 1;
   $('importDone').hidden = true; $('importErr').hidden = true; $('importNotes').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
+
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
-  try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    const imported = d.imported || 0, skipped = d.skipped || 0;
-    // 「一个都没进来」是失败而不是完成：按错误样式显示，否则用户只看到"成功 0 个"
-    // 却看不到任何原因（原因以前只进 console.warn，面板上完全不可见）。
-    const failed = imported === 0 && skipped > 0;
-    const el = failed ? $('importErr') : $('importDone');
-    el.hidden = false;
-    el.textContent = (failed ? '导入失败：' : '导入完成：') + '成功 ' + imported + ' 个' +
-      (skipped ? '，跳过 ' + skipped + ' 个' : '');
-    renderImportNotes(d.errors, d.warnings);
-    loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
+
+  const inp = $('importFile'), doneEl = $('importDone');
+  let imported = 0, skipped = 0, failedFiles = 0;
+  const errs = [], warns = [];
+
+  inp.disabled = true;
+  // 逐文件**顺序**上传：导入每个号都会顺带打一次上游（签到 / 激活 / 额度），
+  // 并发上传等于并发打上游，容易被风控——顺序跑慢一点但稳。
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (multi) {
+      doneEl.hidden = false;
+      doneEl.className = 'state';
+      doneEl.textContent = '导入中… ' + (i + 1) + '/' + files.length + '（' + f.name + '）';
+    }
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      imported += d.imported || 0;
+      skipped += d.skipped || 0;
+      // 多文件时把文件名带进每条原因，否则一堆「第 N 条」分不清是哪个文件。
+      const prefix = multi ? f.name + '：' : '';
+      (d.errors || []).forEach(m => errs.push(prefix + m));
+      (d.warnings || []).forEach(m => warns.push(prefix + m));
+    } catch (e) {
+      failedFiles++;
+      errs.push(f.name + '：' + e.message);
+    }
   }
-  $('importFile').value = '';
+  inp.disabled = false;
+
+  // 「一个都没进来」是失败而不是完成：按错误样式显示，否则用户只看到"成功 0 个"
+  // 却看不到任何原因（原因以前只进 console.warn，面板上完全不可见）。
+  const failed = imported === 0 && (skipped > 0 || failedFiles > 0);
+  const el = failed ? $('importErr') : $('importDone');
+  const other = failed ? $('importDone') : $('importErr');
+  other.hidden = true;
+  el.className = failed ? 'state err' : 'state ok';
+  el.hidden = false;
+  if (!multi && failedFiles === 1 && errs.length) {
+    // 单文件直接给底层原因（与旧行为一致），不必再套一层「成功 0 个」。
+    el.textContent = '导入失败：' + errs[0].replace(/^[^：]*：/, '');
+  } else {
+    el.textContent = (failed ? '导入失败：' : '导入完成：') +
+      '成功 ' + imported + ' 个' + (skipped ? '，跳过 ' + skipped + ' 个' : '') +
+      (multi ? '（共 ' + files.length + ' 个文件' +
+        (failedFiles ? '，' + failedFiles + ' 个文件处理失败' : '') + '）' : '');
+  }
+
+  renderImportNotes(errs, warns);
+  loadOverview(true);
+  inp.value = '';
 };
 
 /* 导入结果明细上屏：✗ 跳过原因、! 已导入但需知情的警告。

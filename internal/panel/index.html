@@ -1390,8 +1390,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。<b>可一次多选</b>（Ctrl+A / 拖框全选）；文件需为账号数组格式（单对象也认）。</div>
+        <input type="file" id="importFile" accept=".json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
         <div id="importNotes" class="imp-notes" hidden></div>

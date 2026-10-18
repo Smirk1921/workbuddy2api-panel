@@ -203,27 +203,36 @@ Smirk1921/workbuddy2api-panel               本仓库：复刻（个人自用增
 - 顺手修掉一个长期口径错误：企业版 `credits_total = -1`（不限量）此前被直接累加进
   总额（总额少 1），现在单独计数。
 
-### 11. 账号导出（面板内置，按分组目录打包）
+### 11. 账号导出（面板内置，单文件 JSON）
 
 以前只能靠外部 PowerShell 脚本导出。现在面板内置：
 `GET /panel/api/export/accounts?uids=…&credit=credits|credits_total`，
 账号池工具栏的「**导出**」按钮即调它（有勾选导勾选，无勾选导当前可见集）。
 
-输出与本地脚本 / 「账号」目录里的既有文件（如 `60800953-4000.json`）**逐字段一致**：
+**输出始终是一个 .json 文件（不打包 zip）**：
 
-```
-[ { id, uid, email, nickname, access_token, refresh_token,
-    token_type: "Bearer", expires_at(毫秒), domain, status: "active" } ]
-```
+| 导出范围 | 文件名 | 内容 |
+|---|---|---|
+| 1 个账号 | **`<账号名>-<积分>.json`** | 与「账号」目录里的既有文件（`60800953-4000.json`）**逐字段一致**的单元素数组 |
+| 多个账号 | `账号导出-<时间戳>.json` | 账号数组；每条在规范 10 字段之外附 `group` 与 `credits`（导入端忽略未知字段） |
 
-- **文件名** `<账号名>-<积分>.json`，同组同名追加 uid 前 8 位去重；
-- **按分组目录打包**：解压后就是 `主力/xxx.json`、`备机/xxx.json`、`未分组/xxx.json`；
-  只命中 1 个账号时直接返回 `.json`（不带目录）；
+多账号时的 `group`/`credits` 是为了让打包脚本能还原「账号名-积分」文件名与分组目录——
+凭证格式本身不携带积分，积分只体现在文件名里。
+
 - **昵称还原**：实例落盘的昵称是打码形态（`703****0`，84 个号里 51 个是这种），
   导出时用 access_token 的 JWT `preferred_username` 还原，**并与打码值交叉校验**
   （前 3 位 + 尾部长度），对不上就保留打码值并在 `X-Export-Warnings` 里计数，绝不猜；
 - 缺 `access_token` 的账号跳过并计入 `X-Export-Skipped`；响应带 `Cache-Control: no-store`，
   端点受面板 api_key 保护。
+
+**需要「一账号一文件 / 按组目录 / zip」时**用同目录的打包脚本（`打包导出JSON.ps1`）：
+
+```powershell
+pwsh -NoProfile -File .\打包导出JSON.ps1 -Json <导出的.json> -Zip
+```
+
+它把导出文件拆成 `主力/98175153-3096.json`、`备机/…`、`未分组/…`，剔除 `group`/`credits`
+还原成规范格式，`-Zip` 时再打成 `打包-<时间戳>.zip`（并校验条目数）。
 
 ### 附：摘取的上游补丁与调研结论
 

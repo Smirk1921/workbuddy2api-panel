@@ -3,10 +3,7 @@
 package panel
 
 import (
-	"archive/zip"
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,10 +83,17 @@ func TestExportSingleAccountJSON(t *testing.T) {
 			t.Errorf("导出 JSON 缺键 %s", k)
 		}
 	}
+	// 单账号导出必须与「账号」目录里的样例完全一致：不得混入 group/credits 元数据。
+	for _, k := range []string{`"group"`, `"credits"`} {
+		if strings.Contains(rec.Body.String(), k) {
+			t.Errorf("单账号导出不该包含元数据键 %s", k)
+		}
+	}
 }
 
-// 多账号：zip，条目按分组目录组织；未分组进「未分组/」。
-func TestExportMultiAccountZip(t *testing.T) {
+// 多账号：一个 JSON 数组（不是 zip），文件名 账号导出-<时间戳>.json；
+// 每条记录在规范字段之外带 group/credits，供打包脚本还原「账号名-积分」文件名。
+func TestExportMultiAccountJSON(t *testing.T) {
 	pl, _, get := newExportPanel(t,
 		&auth.Auth{UID: "u1", Nickname: "n1", AccessToken: exportJWT(t, "u1", "n1", "", 100), RefreshToken: "r1", Domain: "www.workbuddy.cn", ExpiresAt: 100},
 		&auth.Auth{UID: "u2", Nickname: "n2", AccessToken: exportJWT(t, "u2", "n2", "", 200), RefreshToken: "r2", Domain: "www.workbuddy.cn", ExpiresAt: 200},
@@ -100,47 +104,61 @@ func TestExportMultiAccountZip(t *testing.T) {
 	pl.SetCredits("u3", 1200, 0)
 	pl.SetGroup("u1", "主力")
 	pl.SetGroup("u2", "主力")
-	// u3 未分组
 
 	rec := get("")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
-		t.Fatalf("Content-Type=%q want application/zip", ct)
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type=%q want application/json（不再打包 zip）", ct)
 	}
-	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
-	if err != nil {
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, ".json") || strings.Contains(cd, ".zip") {
+		t.Fatalf("Content-Disposition=%q（应为 .json）", cd)
+	}
+	var list []exportAccountMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	var names []string
-	for _, f := range zr.File {
-		names = append(names, f.Name)
+	if len(list) != 3 {
+		t.Fatalf("len=%d want 3", len(list))
 	}
-	joined := strings.Join(names, "|")
-	for _, want := range []string{"主力/n1-4000.json", "主力/n2-3500.json", "未分组/n3-1200.json"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("zip 条目缺 %q（实际 %v）", want, names)
-		}
+	byUID := map[string]exportAccountMeta{}
+	for _, m := range list {
+		byUID[m.UID] = m
 	}
-	// 抽一个条目验证内容仍是单元素数组
-	for _, f := range zr.File {
-		if f.Name != "主力/n1-4000.json" {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, _ := io.ReadAll(rc)
-		rc.Close()
-		var list []exportAccount
-		if err := json.Unmarshal(raw, &list); err != nil {
-			t.Fatal(err)
-		}
-		if len(list) != 1 || list[0].Nickname != "n1" || list[0].ExpiresAt != 100000 {
-			t.Errorf("条目内容异常: %+v", list)
-		}
+	if m := byUID["u1"]; m.Nickname != "n1" || m.Group != "主力" || m.Credits != 4000 {
+		t.Errorf("u1=%+v（应带 group=主力 credits=4000）", m)
+	}
+	if m := byUID["u3"]; m.Group != "" || m.Credits != 1200 {
+		t.Errorf("u3=%+v（未分组，group 应为空）", m)
+	}
+	// 规范字段仍在
+	if byUID["u1"].Domain != "www.workbuddy.cn" || byUID["u1"].ExpiresAt != 100000 {
+		t.Errorf("规范字段异常: %+v", byUID["u1"])
+	}
+}
+
+// 缺 access_token 的账号跳过并计入 skipped。
+func TestExportSkipsMissingToken(t *testing.T) {
+	pl, _, get := newExportPanel(t,
+		&auth.Auth{UID: "u1", Nickname: "n1", AccessToken: exportJWT(t, "u1", "n1", "", 100), RefreshToken: "r", Domain: "www.workbuddy.cn", ExpiresAt: 100},
+		&auth.Auth{UID: "u2", Nickname: "n2", AccessToken: exportJWT(t, "u2", "n2", "", 100), RefreshToken: "r", Domain: "www.workbuddy.cn", ExpiresAt: 100},
+		&auth.Auth{UID: "u3", Nickname: "noToken", RefreshToken: "r", Domain: "www.workbuddy.cn"},
+	)
+	pl.SetCredits("u1", 100, 0)
+	pl.SetCredits("u2", 100, 0)
+
+	rec := get("")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Export-Skipped") != "1" {
+		t.Errorf("skipped=%q want 1", rec.Header().Get("X-Export-Skipped"))
+	}
+	var list []exportAccountMeta
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 2 {
+		t.Fatalf("应导出 2 个（缺 token 的跳过），实得 %d", len(list))
 	}
 }
 
@@ -161,39 +179,6 @@ func TestExportMaskMismatchKeepsMasked(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)
 	if list[0].Nickname != "608****3" {
 		t.Errorf("不吻合时应保留打码值，实得 %q", list[0].Nickname)
-	}
-}
-
-// 缺 access_token 的账号跳过并计入 skipped；同组同名去重。
-func TestExportSkipsAndDedup(t *testing.T) {
-	at := exportJWT(t, "u1", "dup", "", 100)
-	pl, _, get := newExportPanel(t,
-		&auth.Auth{UID: "u1", Nickname: "dup", AccessToken: at, RefreshToken: "r", Domain: "www.workbuddy.cn", ExpiresAt: 100},
-		&auth.Auth{UID: "u2", Nickname: "dup", AccessToken: exportJWT(t, "u2", "dup", "", 100), RefreshToken: "r", Domain: "www.workbuddy.cn", ExpiresAt: 100},
-		&auth.Auth{UID: "u3", Nickname: "noToken", RefreshToken: "r", Domain: "www.workbuddy.cn"},
-	)
-	pl.SetCredits("u1", 100, 0)
-	pl.SetCredits("u2", 100, 0)
-	pl.SetGroup("u1", "组A")
-	pl.SetGroup("u2", "组A")
-
-	rec := get("")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("X-Export-Skipped") != "1" {
-		t.Errorf("skipped=%q want 1", rec.Header().Get("X-Export-Skipped"))
-	}
-	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(zr.File) != 2 {
-		t.Fatalf("条目数=%d want 2（两个 dup，缺 token 的跳过）", len(zr.File))
-	}
-	// 同组同名：第二个追加 uid 前 8 位
-	if zr.File[0].Name == zr.File[1].Name {
-		t.Fatalf("同组同名未去重: %v", []string{zr.File[0].Name, zr.File[1].Name})
 	}
 }
 

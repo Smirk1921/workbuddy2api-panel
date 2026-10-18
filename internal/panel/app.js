@@ -858,7 +858,8 @@ $('btnExport').onclick = async () => {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    toast('已导出 ' + (uids.length - skipped) + ' 个账号（按分组目录打包）', 'ok');
+    toast('已导出 ' + (uids.length - skipped) + ' 个账号（' +
+      (uids.length - skipped === 1 ? '<账号名>-<积分>.json' : '单个 JSON 文件') + '）', 'ok');
   } catch (e) {
     toast('导出失败：' + e.message, 'err');
   } finally {

@@ -2,22 +2,27 @@
 //
 //	GET /panel/api/export/accounts?uids=uid1,uid2&credit=credits
 //
-// 口径对齐本地脚本「导出实例账号.ps1」与「账号」目录里的既有文件
-// （如 `60800953-4000.json`）：
-//   - 每个账号一个文件，单元素数组：{id,uid,email,nickname,access_token,
-//     refresh_token,token_type,expires_at(毫秒),domain,status}
-//   - 文件名 `<账号名>-<积分>.json`（同名追加 uid 前 8 位去重）
+// 输出**始终是一个 .json 文件**（不打包 zip）：
+//   - 只命中 1 个账号 → 文件名 `<账号名>-<积分>.json`，内容是与「账号」目录里的既有
+//     文件（如 60800953-4000.json）**逐字段一致**的单元素数组；
+//   - 命中多个账号 → 文件名 `账号导出-<时间戳>.json`，内容是这些账号的数组。
+//     多账号时每条记录额外带 `group` 与 `credits` 两个字段（导入端忽略未知字段），
+//     供外部打包脚本还原「账号名-积分」的文件名与分组目录。
+//
+// 需要「一账号一文件 / 按组目录 / 再打包成 zip」时，用随附的打包脚本处理导出文件
+// （打包脚本.ps1，见部署目录），面板侧不再做 zip。
+//
+// 口径对齐本地脚本「导出实例账号.ps1」：
+//   - 字段：{id,uid,email,nickname,access_token,refresh_token,token_type,
+//     expires_at(毫秒),domain,status}
 //   - 账号名：实例落盘的昵称是**打码形态**（703****0），用 access_token 的 JWT
 //     claim `preferred_username` 还原，**并校验与打码值吻合**（前 3 位 + 尾部长度），
 //     对不上就保留打码值并告警，避免张冠李戴。
 //
-// 输出形态：只命中 1 个账号 → 直接返回 .json；多个 → 打包成 zip（一个账号一个条目）。
-// 全部在内存完成（账号数有界），不落临时文件。导出内容含凭证，响应带
-// `Cache-Control: no-store`，且端点本身受面板 api_key 保护。
+// 导出内容含凭证：响应带 `Cache-Control: no-store`，端点受面板 api_key 保护。
 package panel
 
 import (
-	"archive/zip"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -43,13 +48,16 @@ type exportAccount struct {
 	Status       string `json:"status"`
 }
 
-// exportFile 一个待输出的文件（名 + 内容）。
-type exportFile struct {
-	Name string
-	Data []byte
+// exportAccountMeta 多账号导出时的一条记录：在前面的规范字段之外附加分组与积分。
+// 这两个字段是为了让「打包脚本」能还原 `<账号名>-<积分>.json` 的文件名与分组目录
+// ——凭证格式本身不携带积分，只在文件名里体现。导入端会忽略未知字段。
+type exportAccountMeta struct {
+	exportAccount
+	Group   string `json:"group,omitempty"`
+	Credits int64  `json:"credits"`
 }
 
-// exportAccounts 导出账号（JSON 或 ZIP）。
+// exportAccounts 导出账号（单个 .json 文件）。
 func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	creditField := q.Get("credit")
@@ -84,50 +92,49 @@ func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, skipped, warns := p.buildExportFiles(targets, creditField)
-	if len(files) == 0 {
+	recs, metas, skipped, warns := p.buildExportRecords(targets, creditField)
+	if len(recs) == 0 {
 		writeErr(w, http.StatusBadRequest, "没有可导出的账号："+strings.Join(skipped, "；"))
 		return
 	}
 
-	// 只有在「按 uid 导出」时，uid 不存在/未加载才值得单独回报（全量导出时池内即全部）。
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Export-Total", strconv.Itoa(len(targets)))
-	w.Header().Set("X-Export-Files", strconv.Itoa(len(files)))
+	w.Header().Set("X-Export-Count", strconv.Itoa(len(recs)))
 	w.Header().Set("X-Export-Skipped", strconv.Itoa(len(skipped)))
 	w.Header().Set("X-Export-Warnings", strconv.Itoa(len(warns)))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	if len(files) == 1 {
-		// 单账号直接给 .json：去掉分组目录前缀（响应头里的文件名不能带 /）。
-		name := files[0].Name
-		if i := strings.LastIndex(name, "/"); i >= 0 {
-			name = name[i+1:]
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if len(recs) == 1 {
+		// 单账号：文件名 <账号名>-<积分>.json，内容与「账号」目录里的样例完全一致
+		// （不附加 group/credits 元数据）。
+		name := safeExportName(
+			recs[0].Nickname+"-"+strconv.FormatInt(metas[0].Credits, 10),
+			shortUID(recs[0].UID)) + ".json"
 		w.Header().Set("Content-Disposition", contentDisposition(name))
-		_, _ = w.Write(files[0].Data)
+		data, err := json.MarshalIndent(recs, "", "  ")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "序列化失败: "+err.Error())
+			return
+		}
+		_, _ = w.Write(append(data, '\n'))
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/zip")
+	// 多账号：一个 JSON 数组（每条带 group/credits 元数据，供打包脚本还原文件名）。
 	w.Header().Set("Content-Disposition",
-		contentDisposition("账号导出-"+time.Now().Format("20060102-150405")+".zip"))
-	zw := zip.NewWriter(w)
-	for _, f := range files {
-		fw, err := zw.Create(f.Name)
-		if err != nil {
-			return
-		}
-		if _, err := fw.Write(f.Data); err != nil {
-			return
-		}
+		contentDisposition("账号导出-"+time.Now().Format("20060102-150405")+".json"))
+	data, err := json.MarshalIndent(metas, "", "  ")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "序列化失败: "+err.Error())
+		return
 	}
-	_ = zw.Close()
+	_, _ = w.Write(append(data, '\n'))
 }
 
-// buildExportFiles 按目标账号生成导出文件。skipped/warns 用于回报原因。
-func (p *Panel) buildExportFiles(targets []pool.Status, creditField string) (files []exportFile, skipped, warns []string) {
-	used := make(map[string]bool, len(targets))
+// buildExportRecords 按目标账号生成导出记录。recs 与 metas 一一对应
+// （metas[i] 内嵌 recs[i] 的全部字段）。skipped/warns 用于回报原因。
+func (p *Panel) buildExportRecords(targets []pool.Status, creditField string) (recs []exportAccount, metas []exportAccountMeta, skipped, warns []string) {
 	for _, st := range targets {
 		a := p.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
@@ -183,29 +190,14 @@ func (p *Panel) buildExportFiles(targets []pool.Status, creditField string) (fil
 			Domain:       a.DomainValue(),
 			Status:       "active",
 		}
-		data, err := json.MarshalIndent([]exportAccount{rec}, "", "  ")
-		if err != nil {
-			skipped = append(skipped, st.UID+": 序列化失败: "+err.Error())
-			continue
-		}
-		data = append(data, '\n') // 与脚本 Set-Content 的结尾换行一致
-
-		// 按分组目录组织：解压后直接是「主力/xxx.json」「备机/xxx.json」「未分组/xxx.json」。
-		// 组名同样做文件名安全化（组名是用户自由输入，可能带 / \ 之类）。
-		dir := safeExportName(strings.TrimSpace(st.Group), "")
-		if dir == "" {
-			dir = "未分组"
-		}
-		base := safeExportName(nick+"-"+strconv.FormatInt(credits, 10), shortUID(st.UID))
-		name := dir + "/" + base + ".json"
-		if used[name] {
-			// 同组内同名（账号名 + 积分都相同）→ 追加 uid 前 8 位区分，绝不覆盖。
-			name = dir + "/" + base + "-" + shortUID(st.UID) + ".json"
-		}
-		used[name] = true
-		files = append(files, exportFile{Name: name, Data: data})
+		recs = append(recs, rec)
+		metas = append(metas, exportAccountMeta{
+			exportAccount: rec,
+			Group:         strings.TrimSpace(st.Group),
+			Credits:       credits,
+		})
 	}
-	return files, skipped, warns
+	return recs, metas, skipped, warns
 }
 
 // shortUID 取 uid 前 8 位作为兜底名（与脚本同口径）。
@@ -285,9 +277,5 @@ func contentDisposition(name string) string {
 	if ascii {
 		return `attachment; filename="` + name + `"`
 	}
-	fallback := "export.json"
-	if strings.HasSuffix(strings.ToLower(name), ".zip") {
-		fallback = "export.zip"
-	}
-	return `attachment; filename="` + fallback + `"; filename*=UTF-8''` + url.PathEscape(name)
+	return `attachment; filename="export.json"; filename*=UTF-8''` + url.PathEscape(name)
 }

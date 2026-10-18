@@ -199,6 +199,28 @@ Smirk1921/workbuddy2api-panel               本仓库：复刻（个人自用增
 - 顺手修掉一个长期口径错误：企业版 `credits_total = -1`（不限量）此前被直接累加进
   总额（总额少 1），现在单独计数。
 
+### 11. 账号导出（面板内置，按分组目录打包）
+
+以前只能靠外部 PowerShell 脚本导出。现在面板内置：
+`GET /panel/api/export/accounts?uids=…&credit=credits|credits_total`，
+账号池工具栏的「**导出**」按钮即调它（有勾选导勾选，无勾选导当前可见集）。
+
+输出与本地脚本 / 「账号」目录里的既有文件（如 `60800953-4000.json`）**逐字段一致**：
+
+```
+[ { id, uid, email, nickname, access_token, refresh_token,
+    token_type: "Bearer", expires_at(毫秒), domain, status: "active" } ]
+```
+
+- **文件名** `<账号名>-<积分>.json`，同组同名追加 uid 前 8 位去重；
+- **按分组目录打包**：解压后就是 `主力/xxx.json`、`备机/xxx.json`、`未分组/xxx.json`；
+  只命中 1 个账号时直接返回 `.json`（不带目录）；
+- **昵称还原**：实例落盘的昵称是打码形态（`703****0`，84 个号里 51 个是这种），
+  导出时用 access_token 的 JWT `preferred_username` 还原，**并与打码值交叉校验**
+  （前 3 位 + 尾部长度），对不上就保留打码值并在 `X-Export-Warnings` 里计数，绝不猜；
+- 缺 `access_token` 的账号跳过并计入 `X-Export-Skipped`；响应带 `Cache-Control: no-store`，
+  端点受面板 api_key 保护。
+
 ### 附：摘取的上游补丁与调研结论
 
 - **PR #217（同账号 refresh 单飞）已摘入**：上游对 refreshToken 有反重放，同一 RT 被

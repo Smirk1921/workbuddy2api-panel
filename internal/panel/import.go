@@ -81,10 +81,16 @@ type importPlan struct {
 	warnings []string
 }
 
-// jwtHint JWT payload 里导入端会用到的两个声明。
+// jwtHint JWT payload 里会用到的声明。
+//
+// 导入端只用 Exp/Sub（过期时间与 uid 回填）；导出端另用 PreferredUsername/Email——
+// 实例落盘的昵称是**打码形态**（如 703****0），导出时用 token 里的全量用户名还原，
+// 并与打码值交叉校验（见 export.go 的 maskMatches）。
 type jwtHint struct {
-	Exp int64  `json:"exp"`
-	Sub string `json:"sub"`
+	Exp               int64  `json:"exp"`
+	Sub               string `json:"sub"`
+	PreferredUsername string `json:"preferred_username"`
+	Email             string `json:"email"`
 }
 
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。

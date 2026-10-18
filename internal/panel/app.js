@@ -825,6 +825,47 @@ $('btnGSelClear').onclick = () => {
   renderAccounts((overviewData && overviewData.accounts) || []);
 };
 
+/* 导出：有勾选导勾选，无勾选导「当前可见」（分组 + 状态双筛选）。
+   服务端按**分组目录**打包成 zip（单账号直接给 .json），文件格式与「账号」目录里的
+   既有文件一致：<账号名>-<积分>.json，内容为单元素数组。 */
+$('btnExport').onclick = async () => {
+  const uids = selUids.size ? [...selUids] : visibleAccounts().map(s => s.uid);
+  if (!uids.length) { toast('没有可导出的账号', 'err'); return; }
+  const b = $('btnExport');
+  b.disabled = true;
+  try {
+    const h = {};
+    const k = localStorage.getItem(LS_KEY);
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    const r = await fetch('/panel/api/export/accounts?uids=' + encodeURIComponent(uids.join(',')), { headers: h });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || ('HTTP ' + r.status));
+    }
+    const skipped = Number(r.headers.get('X-Export-Skipped') || 0);
+    // 文件名优先用服务端给的中文名（filename*=UTF-8''...），否则回落默认。
+    const cd = r.headers.get('Content-Disposition') || '';
+    let name = 'export.zip';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    if (m) name = decodeURIComponent(m[1]);
+    else { const m2 = cd.match(/filename="([^"]+)"/i); if (m2) name = m2[1]; }
+
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('已导出 ' + (uids.length - skipped) + ' 个账号（按分组目录打包）', 'ok');
+  } catch (e) {
+    toast('导出失败：' + e.message, 'err');
+  } finally {
+    b.disabled = false;
+  }
+};
+
 // 全选：只作用于「当前筛选后可见」的行，不影响其它分组的勾选。
 $('selAll').onchange = () => {
   const visible = visibleAccounts();

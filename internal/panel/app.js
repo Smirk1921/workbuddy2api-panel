@@ -826,44 +826,80 @@ $('btnGSelClear').onclick = () => {
 };
 
 /* 导出：有勾选导勾选，无勾选导「当前可见」（分组 + 状态双筛选）。
-   服务端按**分组目录**打包成 zip（单账号直接给 .json），文件格式与「账号」目录里的
-   既有文件一致：<账号名>-<积分>.json，内容为单元素数组。 */
+   两种方式（都不生成 zip，打包交给本地脚本）：
+   - combined：一个 JSON 文件（单账号 <账号名>-<积分>.json；多账号 账号导出-<时间戳>.json）
+   - split   ：服务端返回逐账号清单，前端逐个下载 <账号名>-<积分>.json */
+const EXPORT_MODE_KEY = 'wb2api.exportMode';
+const exportModeSel = $('exportMode');
+if (exportModeSel) {
+  const savedMode = localStorage.getItem(EXPORT_MODE_KEY);
+  if (savedMode === 'combined' || savedMode === 'split') exportModeSel.value = savedMode;
+  exportModeSel.onchange = () => localStorage.setItem(EXPORT_MODE_KEY, exportModeSel.value);
+}
+
+function downloadBlob(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
 $('btnExport').onclick = async () => {
   const uids = selUids.size ? [...selUids] : visibleAccounts().map(s => s.uid);
   if (!uids.length) { toast('没有可导出的账号', 'err'); return; }
+  const mode = exportModeSel ? exportModeSel.value : 'combined';
   const b = $('btnExport');
+  const oldText = b.textContent;
   b.disabled = true;
+  b.textContent = '导出中…';
   try {
     const h = {};
     const k = localStorage.getItem(LS_KEY);
     if (k) h['Authorization'] = 'Bearer ' + k;
-    const r = await fetch('/panel/api/export/accounts?uids=' + encodeURIComponent(uids.join(',')), { headers: h });
+    const r = await fetch('/panel/api/export/accounts?uids=' +
+      encodeURIComponent(uids.join(',')) + '&mode=' + encodeURIComponent(mode), { headers: h });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       throw new Error(d.error || ('HTTP ' + r.status));
     }
+
+    if (mode === 'split') {
+      const manifest = await r.json();
+      const files = Array.isArray(manifest.files) ? manifest.files : [];
+      if (!files.length) throw new Error('没有可导出的账号');
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const text = JSON.stringify([f.content], null, 2) + '\n';
+        downloadBlob(f.name, new Blob([text], { type: 'application/json;charset=utf-8' }));
+        if (i + 1 < files.length) await new Promise(res => setTimeout(res, 150));
+      }
+      const skipped = Number(manifest.skipped || 0);
+      toast('已触发 ' + files.length + ' 个 JSON 下载' +
+        (skipped ? '（跳过 ' + skipped + ' 个）' : '') +
+        '；浏览器如询问请允许多文件下载', 'ok');
+      return;
+    }
+
     const skipped = Number(r.headers.get('X-Export-Skipped') || 0);
-    // 文件名优先用服务端给的中文名（filename*=UTF-8''...），否则回落默认。
+    const count = Number(r.headers.get('X-Export-Count') || (uids.length - skipped));
     const cd = r.headers.get('Content-Disposition') || '';
-    let name = 'export.zip';
+    let name = '账号导出.json';
     const m = cd.match(/filename\*=UTF-8''([^;]+)/i);
     if (m) name = decodeURIComponent(m[1]);
     else { const m2 = cd.match(/filename="([^"]+)"/i); if (m2) name = m2[1]; }
 
     const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    toast('已导出 ' + (uids.length - skipped) + ' 个账号（' +
-      (uids.length - skipped === 1 ? '<账号名>-<积分>.json' : '单个 JSON 文件') + '）', 'ok');
+    downloadBlob(name, blob);
+    toast('已导出 ' + count + ' 个账号（' +
+      (count === 1 ? '<账号名>-<积分>.json' : '单个 JSON 文件') + '）', 'ok');
   } catch (e) {
     toast('导出失败：' + e.message, 'err');
   } finally {
     b.disabled = false;
+    b.textContent = oldText;
   }
 };
 

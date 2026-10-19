@@ -217,3 +217,66 @@ func TestExportSafeNames(t *testing.T) {
 		t.Error("没有 * 不算打码值")
 	}
 }
+
+// mode=split：返回逐账号文件清单（不 zip、不设 attachment），
+// 每项 name=<账号名>-<积分>.json，content 只含规范 10 字段。
+func TestExportSplitManifest(t *testing.T) {
+	pl, _, get := newExportPanel(t,
+		&auth.Auth{UID: "u1", Nickname: "n1", AccessToken: exportJWT(t, "u1", "n1", "", 100), RefreshToken: "r1", Domain: "www.workbuddy.cn", ExpiresAt: 100},
+		&auth.Auth{UID: "u2", Nickname: "n2", AccessToken: exportJWT(t, "u2", "n2", "", 200), RefreshToken: "r2", Domain: "www.workbuddy.cn", ExpiresAt: 200},
+	)
+	pl.SetCredits("u1", 4000, 0)
+	pl.SetCredits("u2", 3500, 0)
+	pl.SetGroup("u1", "主力")
+
+	rec := get("?mode=split")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type=%q want application/json", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != "" {
+		t.Errorf("split 清单不应设置 attachment，得到 %q", cd)
+	}
+	var m exportSplitManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if !m.OK || m.Mode != "split" || m.Total != 2 || m.Count != 2 || m.Skipped != 0 || len(m.Files) != 2 {
+		t.Fatalf("manifest=%+v", m)
+	}
+	byUID := map[string]exportSplitFile{}
+	for _, f := range m.Files {
+		byUID[f.Content.UID] = f
+	}
+	if f := byUID["u1"]; f.Name != "n1-4000.json" || f.Group != "主力" || f.Credits != 4000 {
+		t.Errorf("u1=%+v", f)
+	}
+	if f := byUID["u2"]; f.Name != "n2-3500.json" || f.Group != "" || f.Credits != 3500 {
+		t.Errorf("u2=%+v", f)
+	}
+	// content 必须是规范 10 字段，不能把 group/credits 混进去。
+	cb, _ := json.Marshal(byUID["u1"].Content)
+	for _, k := range []string{`"group"`, `"credits"`} {
+		if strings.Contains(string(cb), k) {
+			t.Errorf("split content 不该包含 %s: %s", k, cb)
+		}
+	}
+	for _, k := range []string{`"id"`, `"uid"`, `"access_token"`, `"expires_at"`, `"domain"`} {
+		if !strings.Contains(string(cb), k) {
+			t.Errorf("split content 缺字段 %s", k)
+		}
+	}
+}
+
+func TestExportSplitRejectsUnknownMode(t *testing.T) {
+	_, _, get := newExportPanel(t, &auth.Auth{
+		UID: "u1", Nickname: "n1", AccessToken: exportJWT(t, "u1", "n1", "", 100),
+		RefreshToken: "r1", Domain: "www.workbuddy.cn", ExpiresAt: 100,
+	})
+	rec := get("?mode=bogus")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400", rec.Code)
+	}
+}

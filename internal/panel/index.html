@@ -805,7 +805,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="grow"></span>
           <span class="flab" id="groupScope"></span>
           <button class="xs" id="btnSel11140" title="筛出被上游 11140 风控封禁的账号并全选（便于一次性禁用 / 移除 / 移组）">选中 11140</button>
-          <button class="xs" id="btnExport" title="导出勾选（无勾选则导出当前可见）账号：cockpit 导入格式 .json；单账号文件名 &lt;账号名&gt;-&lt;积分&gt;.json，多个则为一个 JSON 文件（需要按组拆包请用打包脚本）">导出</button>
+          <select class="xs" id="exportMode" title="导出方式：合并=一个 JSON；独立=每个账号一个 JSON（不打包，浏览器可能询问多文件下载）">
+            <option value="combined">合并为一个 JSON</option>
+            <option value="split">每个账号一个 JSON</option>
+          </select>
+          <button class="xs" id="btnExport" title="导出勾选（无勾选则导出当前可见）账号：合并=一个 JSON；独立=每个账号一个 JSON；不生成 zip，打包交给本地脚本">导出</button>
           <button class="xs" id="btnGSelClear" title="清除表格里勾选的账号">清除选择</button>
         </div>
         <div class="fbar" id="batchBar">

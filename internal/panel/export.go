@@ -2,15 +2,16 @@
 //
 //	GET /panel/api/export/accounts?uids=uid1,uid2&credit=credits
 //
-// 输出**始终是一个 .json 文件**（不打包 zip）：
-//   - 只命中 1 个账号 → 文件名 `<账号名>-<积分>.json`，内容是与「账号」目录里的既有
-//     文件（如 60800953-4000.json）**逐字段一致**的单元素数组；
-//   - 命中多个账号 → 文件名 `账号导出-<时间戳>.json`，内容是这些账号的数组。
-//     多账号时每条记录额外带 `group` 与 `credits` 两个字段（导入端忽略未知字段），
-//     供外部打包脚本还原「账号名-积分」的文件名与分组目录。
-//
-// 需要「一账号一文件 / 按组目录 / 再打包成 zip」时，用随附的打包脚本处理导出文件
-// （打包脚本.ps1，见部署目录），面板侧不再做 zip。
+// 输出**始终是 .json 文件**（不打包 zip），`mode` 控制多账号的交付方式：
+//   - mode=combined（默认）：
+//     · 只命中 1 个账号 → 文件名 `<账号名>-<积分>.json`，内容是与「账号」目录里的
+//     既有文件（如 60800953-4000.json）**逐字段一致**的单元素数组；
+//     · 命中多个账号 → 文件名 `账号导出-<时间戳>.json`，内容是这些账号的数组。
+//     多账号时每条记录额外带 `group` 与 `credits`（导入端忽略未知字段）。
+//   - mode=split：
+//     返回一个文件清单（JSON），每个账号一项：`name` / `group` / `credits` /
+//     `content`（规范 10 字段）。面板前端按清单逐账号下载 `<账号名>-<积分>.json`。
+//     服务端不生成 zip；需要按组目录/压缩时仍由本地脚本处理。
 //
 // 口径对齐本地脚本「导出实例账号.ps1」：
 //   - 字段：{id,uid,email,nickname,access_token,refresh_token,token_type,
@@ -65,6 +66,15 @@ func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 		creditField = "credits" // 缺省 = 当前可用积分（与脚本默认一致）
 	}
 
+	mode := strings.TrimSpace(q.Get("mode"))
+	if mode == "" {
+		mode = "combined"
+	}
+	if mode != "combined" && mode != "split" {
+		writeErr(w, http.StatusBadRequest, `mode 只支持 "combined" 或 "split"`)
+		return
+	}
+
 	// 目标账号：显式 uids（前端传勾选或当前可见集）优先；缺省 = 池内全部。
 	var targets []pool.Status
 	if raw := strings.TrimSpace(q.Get("uids")); raw != "" {
@@ -105,12 +115,15 @@ func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Export-Warnings", strconv.Itoa(len(warns)))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
+	if mode == "split" {
+		p.writeExportSplit(w, recs, metas, len(targets), len(skipped), len(warns))
+		return
+	}
+
 	if len(recs) == 1 {
 		// 单账号：文件名 <账号名>-<积分>.json，内容与「账号」目录里的样例完全一致
 		// （不附加 group/credits 元数据）。
-		name := safeExportName(
-			recs[0].Nickname+"-"+strconv.FormatInt(metas[0].Credits, 10),
-			shortUID(recs[0].UID)) + ".json"
+		name := exportFileName(recs[0], metas[0].Credits)
 		w.Header().Set("Content-Disposition", contentDisposition(name))
 		data, err := json.MarshalIndent(recs, "", "  ")
 		if err != nil {
@@ -125,6 +138,59 @@ func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition",
 		contentDisposition("账号导出-"+time.Now().Format("20060102-150405")+".json"))
 	data, err := json.MarshalIndent(metas, "", "  ")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "序列化失败: "+err.Error())
+		return
+	}
+	_, _ = w.Write(append(data, '\n'))
+}
+
+// exportFileName 单账号文件名：<账号名>-<积分>.json（非法字符已替换）。
+func exportFileName(rec exportAccount, credits int64) string {
+	return safeExportName(rec.Nickname+"-"+strconv.FormatInt(credits, 10), shortUID(rec.UID)) + ".json"
+}
+
+// exportSplitFile mode=split 清单中的一项。content 只含规范 10 字段；
+// group/credits 放在清单项上，供前端/本地脚本还原文件名与分组目录。
+type exportSplitFile struct {
+	Name    string        `json:"name"`
+	Group   string        `json:"group,omitempty"`
+	Credits int64         `json:"credits"`
+	Content exportAccount `json:"content"`
+}
+
+// exportSplitManifest mode=split 的响应体。前端按 files[] 逐个下载。
+type exportSplitManifest struct {
+	OK       bool              `json:"ok"`
+	Mode     string            `json:"mode"`
+	Total    int               `json:"total"`
+	Count    int               `json:"count"`
+	Skipped  int               `json:"skipped"`
+	Warnings int               `json:"warnings"`
+	Files    []exportSplitFile `json:"files"`
+}
+
+// writeExportSplit 输出逐账号文件清单。不设置 Content-Disposition：清单本身不是
+// 下载文件，避免浏览器把清单存成文件；X-Export-* 头已由 exportAccounts 设置。
+func (p *Panel) writeExportSplit(w http.ResponseWriter, recs []exportAccount, metas []exportAccountMeta, total, skipped, warnings int) {
+	files := make([]exportSplitFile, 0, len(recs))
+	for i, rec := range recs {
+		files = append(files, exportSplitFile{
+			Name:    exportFileName(rec, metas[i].Credits),
+			Group:   metas[i].Group,
+			Credits: metas[i].Credits,
+			Content: rec,
+		})
+	}
+	data, err := json.MarshalIndent(exportSplitManifest{
+		OK:       true,
+		Mode:     "split",
+		Total:    total,
+		Count:    len(files),
+		Skipped:  skipped,
+		Warnings: warnings,
+		Files:    files,
+	}, "", "  ")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "序列化失败: "+err.Error())
 		return

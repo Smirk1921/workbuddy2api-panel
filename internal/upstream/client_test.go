@@ -117,7 +117,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004 / 14003）。
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {
 		body string
@@ -126,6 +126,9 @@ func TestIsModelRateLimit(t *testing.T) {
 		// 6004：模型级限流（issue #31 的核心场景）。
 		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
 		{`{"code": 6004,"msg":"x"}`, true},
+		// 14003：模型瞬时繁忙，同样是模型级。
+		{`{"code":14003,"msg":"too many requests"}`, true},
+		{`{"code": "14003"}`, true},
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
@@ -133,6 +136,29 @@ func TestIsModelRateLimit(t *testing.T) {
 	for _, c := range cases {
 		if got := IsModelRateLimit(c.body); got != c.want {
 			t.Errorf("IsModelRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestIsModelBusy 区分「模型繁忙」14003 与「额度窗口用满」6004：前者没有恢复
+// 时刻，只能短窗口停车；后者按上游墙钟/soft_rate 退避。
+func TestIsModelBusy(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"14003 top-level", `{"code":14003,"msg":"too many requests"}`, true},
+		{"14003 spaced", `{"code": 14003}`, true},
+		{"14003 string", `{"code":"14003"}`, true},
+		{"14003 nested", `{"error":{"data":{"code":14003}}}`, true},
+		{"6004 is not busy", `{"code":6004,"msg":"quota"}`, false},
+		{"requestId only", `{"requestId":"14003"}`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		if got := IsModelBusy(c.body); got != c.want {
+			t.Errorf("%s: IsModelBusy=%v want %v", c.name, got, c.want)
 		}
 	}
 }

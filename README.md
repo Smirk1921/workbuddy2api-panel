@@ -257,6 +257,26 @@ body 里**没有**恢复时刻。它与 `6004` 一样是**模型级**信号：�
 `internal/server/handler.go`；新增测试覆盖 14003/6004 无重置时间、短窗口封顶、
 不缩短已有更晚冷却、换模型仍可选。
 
+### 13. 四个专家体验任务（`expert_use_*`，截止 2026-11-20）
+
+2026-10-23 服务端新增四个「在专家页搜索并召唤「X」，完成一次对话」任务，每项
++50 积分 +5 能量，均截止 **2026-11-20**：
+
+- `expert_use_maidehao`：中国电商运营专家（卖得好，`ex_GDl31WahyIH0`）
+- `expert_use_douyinyin`：抖音策略师（斗音音，`ex_FbY5nlWTqDod`）
+- `expert_use_shangjia_xuanchuan`：商家宣传页与海报设计师（`ex_Weo3x2EZuSDm`）
+- `expert_use_bowangwang`：直播电商教练（播旺旺，`ex_WZY136wV5aMt`）
+
+判据链与 `Expert_lighthouse` 同源：专家市场按 **keyword** 搜索 → **按 `expert_id`
+精确落位**（同名专家很多，不能取首条）→ 召唤事件 → 真实对话取服务端 `requestId`
+→ `expert_actual_use(mode=LOCAL)`。昵称写 `name`、职业名写 `expertTitle`，不能互换。
+
+实现参考活跃复刻 `misakano7545/workbuddy2api-panel` 的 `4c45b1d`，按本分支结构适配：
+`internal/panel/autotask.go` 新增 `expertExperienceTasks` / `runExpertExperience`，
+`internal/upstream/desktop.go` 新增 `MarketExpertSearch`，前端 `AUTO_TASKS` 同步登记；
+新增 `expert_experience_test.go` 覆盖「同名专家按 id 落位」「搜索失败静态兜底」
+「未登记任务码报错」三类回归。
+
 ### 附：摘取的上游补丁与调研结论
 
 - **PR #217（同账号 refresh 单飞）已摘入**：上游对 refreshToken 有反重放，同一 RT 被

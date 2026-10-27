@@ -3417,17 +3417,16 @@ function expDaysLeft(dateStr, today) {
 }
 
 /* 到期卡片折叠状态：默认收起（只留标题 + 一行摘要），展开态封顶 44vh 内滚。
-   用户选择持久化跨会话记住——「账号池」的首要任务是看/管账号，明细按需展开。
-   localStorage 与 $ 都做存在性保护：前端 harness 的切片求值环境未必带 DOM 桩。
+   不再跨会话持久化——「账号池」的首要任务是看/管账号，展开态一旦被记成 '1'，
+   刷新后仍占满首屏，反而把账号表挤出去。现在每次进入页面都从收起态开始；
+   用户手动展开仅在本页面会话内有效。
+   $ 做存在性保护：前端 harness 的切片求值环境未必带 DOM 桩。
    （applyExpState/setExpOpen 定义在下方 renderExpirySnapshot 之后：harness 按区域
    切片求值，落在那两个切片内才能被到期卡片的两个用例取到。） */
-const LS_EXP_OPEN = 'wb2api.expOpen';
 let expOpen = false;
-try { expOpen = localStorage.getItem(LS_EXP_OPEN) === '1'; } catch (e) { expOpen = false; }
 
-function setExpOpen(open, persist) {
+function setExpOpen(open) {
   expOpen = open;
-  if (persist) { try { localStorage.setItem(LS_EXP_OPEN, open ? '1' : '0'); } catch (e) {} }
   applyExpState();
 }
 
@@ -3624,13 +3623,13 @@ async function loadExpiry(force) {
   expFetching = false;
 }
 
-if ($('btnExp')) $('btnExp').onclick = () => { setExpOpen(true, true); loadExpiry(true); };
+if ($('btnExp')) $('btnExp').onclick = () => { setExpOpen(true); loadExpiry(true); };
 
 // 卡片头部点击 = 展开/收起（「检查」按钮不触发收起，它有自己的处理）。
 if ($('expHead')) {
   $('expHead').onclick = (ev) => {
     if (ev.target.closest('#btnExp')) return;
-    setExpOpen(!expOpen, true);
+    setExpOpen(!expOpen);
   };
 }
 applyExpState();

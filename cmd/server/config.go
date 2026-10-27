@@ -148,6 +148,15 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	CN struct {
+		// ChatBase 国内版 chat/模型目录上游 base 覆盖；空 = 回落内置默认
+		// https://www.workbuddy.cn（internal/upstream.New 的 ChatBaseCN，官方桌面端
+		// product.json 的 endpoint）。
+		// 备选入口 copilot.tencent.com 对海外出口（如 Clash 全局 + TUN）的 TLS 握手
+		// 直接复位，CN 模型目录与对话全部 EOF；需要时用它填这个键回落。
+		ChatBase string `json:"chat_base"`
+	} `json:"cn"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`

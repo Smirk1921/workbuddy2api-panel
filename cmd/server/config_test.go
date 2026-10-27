@@ -859,3 +859,23 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// TestCNChatBaseConfig 钉住 cn.chat_base 的解析与缺省回落：
+// 老配置无 cn 段（空字符串）→ 用内置默认；显式配置 → 原样透传给上游。
+func TestCNChatBaseConfig(t *testing.T) {
+	c, err := ParseConfig([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CN.ChatBase != "" {
+		t.Errorf("empty config ChatBase=%q want empty", c.CN.ChatBase)
+	}
+
+	c, err = ParseConfig([]byte(`{"cn":{"chat_base":"https://copilot.tencent.com"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CN.ChatBase != "https://copilot.tencent.com" {
+		t.Errorf("ChatBase=%q want https://copilot.tencent.com", c.CN.ChatBase)
+	}
+}

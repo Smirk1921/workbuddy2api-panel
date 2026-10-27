@@ -723,3 +723,19 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
 	}
 }
+
+// TestCNChatBaseDefault 钉住 CN 对话主域默认值：官方桌面端 endpoint 是
+// www.workbuddy.cn；copilot.tencent.com 是它的 NetworkFailover 备选入口。
+// 这个默认值是可判别形态差异（issue #239 同类风险），改回去前必须想清楚。
+func TestCNChatBaseDefault(t *testing.T) {
+	c := New()
+	if c.ChatBaseCN != "https://www.workbuddy.cn" {
+		t.Fatalf("ChatBaseCN=%q want https://www.workbuddy.cn", c.ChatBaseCN)
+	}
+	if c.WebBaseCN != "https://www.workbuddy.cn" {
+		t.Fatalf("WebBaseCN=%q want https://www.workbuddy.cn", c.WebBaseCN)
+	}
+	if c.BillingBaseCN != "https://www.codebuddy.cn" {
+		t.Fatalf("BillingBaseCN=%q want https://www.codebuddy.cn", c.BillingBaseCN)
+	}
+}

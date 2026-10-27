@@ -277,6 +277,32 @@ body 里**没有**恢复时刻。它与 `6004` 一样是**模型级**信号：�
 新增 `expert_experience_test.go` 覆盖「同名专家按 id 落位」「搜索失败静态兜底」
 「未登记任务码报错」三类回归。
 
+### 14. 429 code 6021（上游队列已满）不罚号、不轮转
+
+上游对模型请求队列打满时返回 `429 {"code":6021,"msg":"queue.full.title"}`
+（`queue.full.title` 是未翻译的 i18n key）。它与 6004/14003 的区别是**不区分模型**：
+实测另一台实例上 11 个不同账号在 14 秒内全部命中，每个账号当时只有 1 条在途请求——
+这是服务级甩负载，不是账号级限流。
+
+网关此前把它归进通用 429（`ErrSoftRate`），于是每个中招账号被账号级 `soft_rate`
+罚停 600s（指数退避封顶 2h）；`MaxRotate=3`，4 次客户端请求就冷掉 11 个号，
+只能人工 revive。
+
+本复刻的修复：
+
+- 新增 `ErrQueueFull`：识别业务码 `6021` 与固定文案 `queue.full`（`IsQueueFull`），
+  判定先于通用 429 兜底；
+- 轮转侧 **fail-fast**：首个 6021 即终止换号（换号打的是同一个队列），
+  一次客户端请求最多 1 次上游调用；
+- 账号零惩罚：不冷却、不熔断、不喂连败；
+- 末端回 `429` + `code=upstream_queue_full` + `Retry-After: 5`（上游带
+  Retry-After 头时以其为准），上游原文（含 requestId）透传；
+- SSE error 帧形态由 `FrameKind` 同步识别。
+
+涉及文件：`internal/upstream/client.go`、`internal/upstream/hint.go`、
+`internal/server/handler.go`；新增测试覆盖 6021/文案识别、数字串不误命中、
+fail-fast 单次上游调用、账号不冷却、Retry-After 与原文透传。
+
 ### 附：摘取的上游补丁与调研结论
 
 - **PR #217（同账号 refresh 单飞）已摘入**：上游对 refreshToken 有反重放，同一 RT 被

@@ -964,6 +964,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
+			// 6021 queue.full 是服务级/模型级队列打满：换号打的是同一个上游队列，
+			// 轮转只会把一次失败放大成 MaxRotate 次上游调用，并把一排健康号按
+			// 账号级 soft_rate 罚停（线上事故：4 次请求冷掉 11 个号）。与 WAF IP
+			// 级拦截同一哲学——确定换号无效的错误立即终止轮转。
+			if kind == upstream.ErrQueueFull {
+				break
+			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
@@ -1166,6 +1173,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrQueueFull:
+			// 6021 队列打满：上游原文（含 requestId）按下方统一逻辑透传，这里只把
+			// 状态码/错误码收敛成「可重试的服务级拥塞」，避免被读成账号全挂。
+			status = http.StatusTooManyRequests
+			code = "upstream_queue_full"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -1211,6 +1223,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint += "; upstream: " + s
 		}
 		status = http.StatusBadRequest
+	}
+	// 6021 队列打满没有恢复墙钟（body 只有 code/msg/requestId）：给客户端一个
+	// 明确的短退避窗口，避免它立刻重试继续压同一个队列。上游若带了 Retry-After
+	// 头则以其为准。
+	if ue != nil && ue.Kind == upstream.ErrQueueFull {
+		sec := 5
+		if ue.RetryAfter > 0 {
+			if s := int((ue.RetryAfter + time.Second - 1) / time.Second); s > 0 {
+				sec = s
+			}
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", sec))
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
@@ -1332,11 +1356,13 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // 此处不再按原始 status 二次判断。仅在 chatCompletions 轮转循环内调用：内容拦截
 // 会立即 400 返回，其余种类 continue 换号（continue 前由 rotateBackoff 退避）。
 //
-// 十条路径，各司其职：
+// 十一条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
 //   - ErrSoftRate → 优先对齐上游重置墙钟（带「将在 … 重置」时 6004 走模型级豁免、
 //     非 6004 走账号级，均不指数堆加）；无重置时间才走有界退避。冷却时长优先采信
 //     Retry-After 头（uerr.RetryAfter，body 文案墙钟之外的头形态来源）。
+//   - ErrQueueFull → 零动作：6021 是服务级队列打满，与账号无关；轮转侧 fail-fast，
+//     末端回 429 + Retry-After。罚号会把上游抖动放大成整池停摆。
 //   - ErrWafBlock → 账号级软冷却：**不 Disable**——WAF 403 是 IP/指纹维频控信号，
 //     罚过即走、到期自愈。时长优先 Retry-After 头；缺失按 wafCooldownBase(60s)
 //     起 · softStreak 指数、封顶 soft_rate_max 的既有 CooldownSoftRate 有界退避。
@@ -1404,6 +1430,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
 		// （热改优先），管理面板改 soft_rate 后立即生效。
 		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
+	case upstream.ErrQueueFull:
+		// 6021 queue.full：上游推理队列打满，是**服务级容量信号**，与具体账号无关
+		// （实测 11 个不同账号在 14 秒内全部命中，每个号当时只有 1 条在途请求）。
+		// 零动作：不冷却、不熔断、不喂连败。轮转侧已 fail-fast，由末端回
+		// 429 + Retry-After 让客户端退避——罚号只会把一次上游抖动放大成整池停摆。
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶

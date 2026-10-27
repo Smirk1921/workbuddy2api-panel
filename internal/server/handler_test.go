@@ -797,6 +797,58 @@ func TestChat14003StaysModelScopedShortWindow(t *testing.T) {
 	}
 }
 
+// TestChatQueueFullFailsFastWithoutPenalty 6021 queue.full 是上游推理队列打满的
+// **服务级**容量信号：账号无关、换号无效。
+//
+// 线上事故形态（2026-10-27 另一台实例）：上游对 cn:kimi-k3.1-pro 返回
+// `429 {"code":6021,"msg":"queue.full.title"}`，网关按账号级 soft_rate 罚停 600s；
+// MaxRotate=3，4 次客户端请求轮转 3 号/次，14 秒冷掉 11 个号，只能人工 revive。
+// 正确处置：首个 6021 即终止轮转（不放大成 3 次上游调用），不罚任何账号，
+// 回 429 + Retry-After，上游原文（含 requestId）透传。
+func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 429, `{"code":6021,"msg":"queue.full.title","requestId":"f069d6babb96b1fba9dbcf354769a338"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a1", AccessToken: "at-1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "a2", AccessToken: "at-2", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "a3", AccessToken: "at-3", ExpiresAt: 9999999999},
+	)
+	// 积分排序只影响首跳选中谁；断言不依赖具体账号。
+	p.SetCredits("a1", 3000, 0)
+	p.SetCredits("a2", 2000, 0)
+	p.SetCredits("a3", 1000, 0)
+	// soft_rate 故意给 600s：6021 绝不能吃这条账号级阶梯。
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 3, SoftCooldown: 600 * time.Second})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"cn:kimi-k3.1-pro","messages":[]}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if calls != 1 {
+		t.Fatalf("queue full 必须 fail-fast，不该轮转：upstream calls=%d want 1", calls)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "5" {
+		t.Errorf("Retry-After=%q want 5", got)
+	}
+	if !strings.Contains(rec.Body.String(), "6021") ||
+		!strings.Contains(rec.Body.String(), "f069d6babb96b1fba9dbcf354769a338") {
+		t.Errorf("body 应透传上游原文（含 requestId），got=%s", rec.Body)
+	}
+	for _, uid := range []string{"a1", "a2", "a3"} {
+		st, _ := p.Status(uid)
+		if st.Cooling {
+			t.Errorf("%s 不得被冷却（服务级拥塞与账号无关）: %+v", uid, st)
+		}
+		if st.BreakerFails > 0 {
+			t.Errorf("%s 不得喂熔断: breaker_fails=%d", uid, st.BreakerFails)
+		}
+	}
+}
+
 func TestChatAllUnavailableReturns503(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false

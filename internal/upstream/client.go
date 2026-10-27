@@ -32,6 +32,7 @@ const (
 	ErrNone           ErrKind = iota // 成功
 	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
 	ErrSoftRate                      // 429 软限流 → 短冷却
+	ErrQueueFull                     // 429 + 6021 queue.full → 服务级队列打满：不罚号、fail-fast，末端 429 + Retry-After
 	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
 	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                        // 5xx 上游故障
@@ -51,6 +52,8 @@ func (k ErrKind) String() string {
 		return "hard_credit"
 	case ErrSoftRate:
 		return "soft_rate"
+	case ErrQueueFull:
+		return "queue_full"
 	case ErrSessionDead:
 		return "session_dead"
 	case ErrNotFound:
@@ -223,6 +226,22 @@ const modelRateLimitCodes = "6004|14003"
 // modelBusyCode 「当前模型请求繁忙」的业务 code（modelRateLimitCodes 的子集）。
 const modelBusyCode = "14003"
 
+// queueFullCode 「请求队列已满」的业务 code。
+//
+// 6021 与 6004/14003 的区别：6004/14003 是**这个模型**被限/忙，换号仍可能成功；
+// 6021 是上游推理队列被打满后的**服务级甩负载**（实测 11 个不同账号在 14 秒内
+// 全部命中，每个账号当时只有 1 条在途请求）。它既不是账号故障，也不是换号能
+// 绕开的模型级限流——换号打的是同一个队列，轮转只会把一次失败放大成 N 次上游
+// 调用，并把 N 个健康号按账号级 soft_rate 罚停 600s（线上事故：4 次客户端请求
+// 轮转 3 号/次，14 秒冷掉 11 个号，只能人工 revive）。
+//
+// 正确处置：不罚号、不轮转，直接回 429 + Retry-After 让客户端退避。
+const queueFullCode = "6021"
+
+// queueFullMsgMarker 6021 的固定文案（实测 msg="queue.full.title"，是一个未翻译的
+// i18n key）。只收这个窄短语；结构化 code 缺失时也能识别。
+const queueFullMsgMarker = "queue.full"
+
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
 const softRateResetPatternCN = `将在 (.+?) 重置`
@@ -234,6 +253,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 var (
 	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?(?:` + modelRateLimitCodes + `)"?`)
 	reModelBusy       = regexp.MustCompile(`"code"\s*:\s*"?` + modelBusyCode + `"?`)
+	reQueueFull       = regexp.MustCompile(`"code"\s*:\s*"?` + queueFullCode + `(?:[^0-9]|$)`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -257,6 +277,22 @@ func IsModelRateLimit(body string) bool {
 // 不可用：一个请求轮转几个号，每个号都中 14003，几十秒内整池冷却 10 分钟。
 func IsModelBusy(body string) bool {
 	return reModelBusy.MatchString(body)
+}
+
+// IsQueueFull 报告 body 是否是上游请求队列打满（业务 code 6021 / msg "queue.full"）。
+//
+// 语义是「服务端此刻排队排满了」，与账号无关，也不指定模型——因此不能按账号级
+// 或 (账号, 模型) 级冷却处置，更不能轮转换号（换号打的是同一个队列）。handler
+// 收到该类错误应 fail-fast 终止轮转并回 429 + Retry-After。
+//
+// 两个信号任一命中即可：结构化 code 6021（JSON 空格/引号容差），或固定文案
+// "queue.full"（实测 msg="queue.full.title"）。不扩到 "queue" 单词，避免误伤
+// 其他业务文案。
+func IsQueueFull(body string) bool {
+	if body == "" {
+		return false
+	}
+	return reQueueFull.MatchString(body) || strings.Contains(strings.ToLower(body), queueFullMsgMarker)
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
@@ -539,6 +575,13 @@ func Classify(status int, body string) ErrKind {
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
+	}
+	// 6021 queue.full：上游推理队列打满后的服务级甩负载。必须先于通用 429 兜底，
+	// 否则会被归成账号级 soft_rate——每个中招的账号被罚停 600s 起、指数退避到 2h，
+	// 而一次客户端请求默认轮转 3 个号，几十秒就能冷掉整池（实测 4 次请求冷 11 个号）。
+	// 服务级信号与账号无关，也不因换号而消失；handler 侧对 ErrQueueFull fail-fast。
+	if IsQueueFull(body) {
+		return ErrQueueFull
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
 	// "额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把限流误归

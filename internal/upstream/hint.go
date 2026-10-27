@@ -53,6 +53,9 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "upstream WAF blocked the gateway; retry after the block window"
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
+	case ErrQueueFull:
+		// 服务级队列打满：换号/立刻重试都打同一个队列，客户端应按 Retry-After 退避。
+		return "upstream request queue is full (service-wide capacity, not an account problem); back off and retry after Retry-After"
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
@@ -99,10 +102,13 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
-// FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// FrameKind 从 SSE error 帧 payload 判定 ErrKind：6021 队列打满（服务级容量信号）
+// 与 6004/14003 模型级限流的流式形态优先（对帧 JSON 直接命中）；其余取帧内
+// error.message 走 Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
+	if IsQueueFull(payload) {
+		return ErrQueueFull
+	}
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
 	}

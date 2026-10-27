@@ -95,6 +95,16 @@ func TestClassify(t *testing.T) {
 		{429, `{"error":{"data":{"code":"14018","msg":"Credits exhausted"}}}`, ErrHardCredit},
 		{429, `{"requestId":"14018","msg":"Credits exhausted"}`, ErrSoftRate},
 		{429, `{"code":1,"msg":"Credits exhausted"}`, ErrSoftRate},
+		// 6021 queue.full：上游推理队列打满的服务级甩负载。必须先于通用 429 兜底
+		// 归 ErrQueueFull——否则每个中招账号按账号级 soft_rate 罚停 600s，一次请求
+		// 轮转 3 个号，几十秒就能冷掉整池。结构化 code 与固定文案两种形态都要认。
+		{429, `{"code":6021,"msg":"queue.full.title","requestId":"f069d6babb96b1fba9dbcf354769a338"}`, ErrQueueFull},
+		{429, `{"code": 6021, "msg": "queue.full.title"}`, ErrQueueFull},
+		{429, `{"code":"6021"}`, ErrQueueFull},
+		{429, `{"msg":"queue.full.title"}`, ErrQueueFull},
+		// 不能被更宽的数字串误命中（60210/16021 不是 6021）。
+		{429, `{"code":60210,"msg":"other"}`, ErrSoftRate},
+		{429, `{"code":16021,"msg":"other"}`, ErrSoftRate},
 		// WAF 403（P0-1）：403 + 无业务信封（无 "code":/"msg": 字段）→ ErrWafBlock。
 		// 空体 / HTML 拦截页 / 纯文本 / 非信封 JSON 均命中。
 		{403, ``, ErrWafBlock},
@@ -160,6 +170,43 @@ func TestIsModelBusy(t *testing.T) {
 		if got := IsModelBusy(c.body); got != c.want {
 			t.Errorf("%s: IsModelBusy=%v want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestIsQueueFull 识别 6021「队列已满」的两种形态：结构化 code（JSON 空格/
+// 引号容差）与未翻译的 i18n 文案 key "queue.full.title"。
+func TestIsQueueFull(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"6021 top-level", `{"code":6021,"msg":"queue.full.title"}`, true},
+		{"6021 spaced", `{"code": 6021, "msg":"queue.full.title"}`, true},
+		{"6021 string", `{"code":"6021"}`, true},
+		{"msg marker only", `{"code":1,"msg":"queue.full.title"}`, true},
+		{"uppercase marker", `{"msg":"QUEUE.FULL.TITLE"}`, true},
+		{"60210 is not 6021", `{"code":60210}`, false},
+		{"16021 is not 6021", `{"code":16021}`, false},
+		{"requestId only", `{"requestId":"6021"}`, false},
+		{"queue word alone", `{"msg":"queued request"}`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		if got := IsQueueFull(c.body); got != c.want {
+			t.Errorf("%s: IsQueueFull=%v want %v (body=%s)", c.name, got, c.want, c.body)
+		}
+	}
+}
+
+// TestFrameKindQueueFull SSE error 帧形态的 6021 也要识别为 ErrQueueFull（流式路径
+// 不走 HTTP 状态码）。头像既有契约：6004/14003 帧仍归 ErrSoftRate。
+func TestFrameKindQueueFull(t *testing.T) {
+	if got := FrameKind(`{"code":6021,"msg":"queue.full.title"}`); got != ErrQueueFull {
+		t.Errorf("FrameKind(6021)=%v want ErrQueueFull", got)
+	}
+	if got := FrameKind(`{"code":14003,"msg":"too many requests"}`); got != ErrSoftRate {
+		t.Errorf("FrameKind(14003)=%v want ErrSoftRate", got)
 	}
 }
 
